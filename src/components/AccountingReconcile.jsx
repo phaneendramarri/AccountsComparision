@@ -11,18 +11,16 @@ const MATCH_EPSILON = 0.005;
 
 const emptyFile = { file: null, name: '', size: 0, headers: [] };
 
-let filterIdCounter = 0;
-const nextFilterId = () => {
-  filterIdCounter += 1;
-  return `f_${filterIdCounter}`;
+let idCounter = 0;
+const nextId = (prefix) => {
+  idCounter += 1;
+  return `${prefix}_${idCounter}`;
 };
 
 function pairKey(pair) {
   return `${pair.colA}::${pair.colB}`;
 }
 
-// Split the user's comma-separated filter values into a Set of trimmed,
-// lower-cased strings. Empty entries are dropped.
 function parseFilterValues(raw) {
   return new Set(
     (raw || '')
@@ -32,8 +30,45 @@ function parseFilterValues(raw) {
   );
 }
 
+function emptyFilter() {
+  return { id: nextId('f'), column: '', valuesText: '' };
+}
+
+function emptyPart(sign = 1) {
+  return {
+    id: nextId('p'),
+    sign,
+    column: '',
+    filters: [emptyFilter()]
+  };
+}
+
 function emptyRule() {
-  return { valueColumn: '', filters: [{ id: nextFilterId(), column: '', valuesText: '' }] };
+  return { parts: [emptyPart(1)] };
+}
+
+// Human-readable expression for the UI/CSV.
+// Example: `+ Σ(amount where glcode ∈ {2134,235}) − Σ(refund where txntype ∈ {1})`
+function formatPartExpression(part, { leading = false } = {}) {
+  if (!part.column) return '';
+  const filterStr =
+    part.filters && part.filters.length > 0
+      ? ' where ' +
+        part.filters
+          .map((filter) => `${filter.column} ∈ {${Array.from(filter.values).join(', ')}}`)
+          .join(' AND ')
+      : '';
+  const body = `Σ(${part.column}${filterStr})`;
+  if (leading) return part.sign === -1 ? `− ${body}` : body;
+  return part.sign === -1 ? `− ${body}` : `+ ${body}`;
+}
+
+function formatRuleExpression(activeParts) {
+  if (!activeParts || activeParts.length === 0) return '';
+  return activeParts
+    .map((part, index) => formatPartExpression(part, { leading: index === 0 }))
+    .filter(Boolean)
+    .join(' ');
 }
 
 export function AccountingReconcile({ pairs, onResultsChange }) {
@@ -46,8 +81,6 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
   const [error, setError] = useState('');
   const abortRef = useRef(null);
 
-  // Reset per-pair rules and any prior result whenever the parent pairs
-  // change (a fresh comparison was just run).
   useEffect(() => {
     const fresh = {};
     pairs.forEach((pair) => {
@@ -57,7 +90,6 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
     setReconResults(null);
   }, [pairs]);
 
-  // Notify the parent so it can include recon data in the downloadable summary.
   useEffect(() => {
     if (!onResultsChange) return;
     if (!reconResults) {
@@ -77,14 +109,21 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
         .map((pair) => {
           const key = pairKey(pair);
           const rule = rules[key];
-          if (!rule || !rule.valueColumn) return null;
-          const filters = rule.filters
-            .map((filter) => ({
-              column: filter.column,
-              values: parseFilterValues(filter.valuesText)
-            }))
-            .filter((filter) => filter.column && filter.values.size > 0);
-          return { key, valueColumn: rule.valueColumn, filters };
+          if (!rule) return null;
+          const parts = rule.parts
+            .filter((part) => part.column)
+            .map((part) => ({
+              sign: part.sign === -1 ? -1 : 1,
+              column: part.column,
+              filters: part.filters
+                .map((filter) => ({
+                  column: filter.column,
+                  values: parseFilterValues(filter.valuesText)
+                }))
+                .filter((filter) => filter.column && filter.values.size > 0)
+            }));
+          if (parts.length === 0) return null;
+          return { key, parts };
         })
         .filter(Boolean),
     [pairs, rules]
@@ -128,58 +167,92 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
     setReconResults(null);
   }, []);
 
-  const handleValueColumnChange = useCallback(
-    (key, column) => {
-      updateRule(key, (rule) => ({ ...rule, valueColumn: column }));
+  const updatePart = useCallback(
+    (key, partId, updater) => {
+      updateRule(key, (rule) => ({
+        ...rule,
+        parts: rule.parts.map((part) => (part.id === partId ? updater(part) : part))
+      }));
     },
     [updateRule]
   );
 
-  const handleFilterColumnChange = useCallback(
-    (key, filterId, column) => {
+  const handleAddPart = useCallback(
+    (key, sign = 1) => {
+      updateRule(key, (rule) => ({ ...rule, parts: [...rule.parts, emptyPart(sign)] }));
+    },
+    [updateRule]
+  );
+
+  const handleRemovePart = useCallback(
+    (key, partId) => {
       updateRule(key, (rule) => ({
         ...rule,
-        filters: rule.filters.map((filter) =>
+        parts: rule.parts.length <= 1 ? [emptyPart(1)] : rule.parts.filter((p) => p.id !== partId)
+      }));
+    },
+    [updateRule]
+  );
+
+  const handlePartSignChange = useCallback(
+    (key, partId, sign) => {
+      updatePart(key, partId, (part) => ({ ...part, sign: sign === -1 ? -1 : 1 }));
+    },
+    [updatePart]
+  );
+
+  const handlePartColumnChange = useCallback(
+    (key, partId, column) => {
+      updatePart(key, partId, (part) => ({ ...part, column }));
+    },
+    [updatePart]
+  );
+
+  const handleAddFilter = useCallback(
+    (key, partId) => {
+      updatePart(key, partId, (part) => ({
+        ...part,
+        filters: [...part.filters, emptyFilter()]
+      }));
+    },
+    [updatePart]
+  );
+
+  const handleRemoveFilter = useCallback(
+    (key, partId, filterId) => {
+      updatePart(key, partId, (part) => ({
+        ...part,
+        filters:
+          part.filters.length <= 1
+            ? [emptyFilter()]
+            : part.filters.filter((filter) => filter.id !== filterId)
+      }));
+    },
+    [updatePart]
+  );
+
+  const handleFilterColumnChange = useCallback(
+    (key, partId, filterId, column) => {
+      updatePart(key, partId, (part) => ({
+        ...part,
+        filters: part.filters.map((filter) =>
           filter.id === filterId ? { ...filter, column } : filter
         )
       }));
     },
-    [updateRule]
+    [updatePart]
   );
 
   const handleFilterValuesChange = useCallback(
-    (key, filterId, valuesText) => {
-      updateRule(key, (rule) => ({
-        ...rule,
-        filters: rule.filters.map((filter) =>
+    (key, partId, filterId, valuesText) => {
+      updatePart(key, partId, (part) => ({
+        ...part,
+        filters: part.filters.map((filter) =>
           filter.id === filterId ? { ...filter, valuesText } : filter
         )
       }));
     },
-    [updateRule]
-  );
-
-  const handleAddFilter = useCallback(
-    (key) => {
-      updateRule(key, (rule) => ({
-        ...rule,
-        filters: [...rule.filters, { id: nextFilterId(), column: '', valuesText: '' }]
-      }));
-    },
-    [updateRule]
-  );
-
-  const handleRemoveFilter = useCallback(
-    (key, filterId) => {
-      updateRule(key, (rule) => ({
-        ...rule,
-        filters:
-          rule.filters.length <= 1
-            ? [{ id: nextFilterId(), column: '', valuesText: '' }]
-            : rule.filters.filter((filter) => filter.id !== filterId)
-      }));
-    },
-    [updateRule]
+    [updatePart]
   );
 
   const handleClearRule = useCallback(
@@ -221,38 +294,31 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
             colA: pair.colA,
             colB: pair.colB,
             diff: pair.diff,
-            valueColumn: rule?.valueColumn || '',
-            filterSummary: '',
+            expression: '',
             accountingSum: null,
             matchedRows: 0,
             delta: null,
             status: 'unmapped',
-            note: rule?.valueColumn
-              ? 'Add at least one filter with values.'
-              : 'Pick a value column to include this pair.'
+            note: 'Pick at least one column to include this pair.'
           };
         }
         const spec = pairSpecs.find((entry) => entry.key === key);
         const info = streamResult.byPair[key];
-        const sum = info.sum;
+        const sum = info.totalSum;
         const delta = pair.diff - sum;
+        const expression = formatRuleExpression(spec.parts);
         let status = Math.abs(delta) < MATCH_EPSILON ? 'match' : 'mismatch';
         let note = '';
-        if (info.valueColumnMissing) {
+        if (info.missingColumns.length > 0) {
           status = 'error';
-          note = `Value column "${spec.valueColumn}" was not found in the accounting file header.`;
-        } else if (info.missingFilterColumns.length > 0) {
-          status = 'error';
-          note = `Missing filter column${info.missingFilterColumns.length === 1 ? '' : 's'}: ${info.missingFilterColumns.join(', ')}`;
+          const uniqueMissing = Array.from(new Set(info.missingColumns));
+          note = `Missing column${uniqueMissing.length === 1 ? '' : 's'} in accounting file: ${uniqueMissing.join(', ')}`;
         }
         return {
           colA: pair.colA,
           colB: pair.colB,
           diff: pair.diff,
-          valueColumn: spec.valueColumn,
-          filterSummary: spec.filters
-            .map((filter) => `${filter.column} ∈ {${Array.from(filter.values).join(', ')}}`)
-            .join(' AND '),
+          expression,
           accountingSum: sum,
           matchedRows: info.matchedRows,
           nonNumericSkipped: info.nonNumericSkipped,
@@ -282,11 +348,11 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
           <div>
             <h2 className="card-title text-base">3. Reconcile with accounting file</h2>
             <p className="text-sm text-base-content/60">
-              Upload the accounting CSV, then for each column-diff row pick the value column to
-              sum and add filters like{' '}
-              <span className="font-mono">glcode ∈ {'{2134, 235}'}</span> AND{' '}
-              <span className="font-mono">transactiontype ∈ {'{1, 0}'}</span>. We stream once and
-              subtract the resulting sum from each diff.
+              Build a formula per pair from any number of add/subtract parts. Each part is its
+              own filtered sum, e.g.{' '}
+              <span className="font-mono">+ Σ(amount where glcode ∈ {'{2134}'})</span>{' '}
+              <span className="font-mono">− Σ(refund where txntype ∈ {'{1}'})</span>. Filters are
+              independent per part.
             </p>
           </div>
           {accounting.file ? (
@@ -318,7 +384,7 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
           <div className="flex flex-col gap-3">
             <div className="text-xs text-base-content/60">
               {configuredCount} of {pairs.length} pair{pairs.length === 1 ? '' : 's'} configured.
-              Rules without a value column or with no active filters are skipped.
+              Rules without any part column are skipped.
             </div>
 
             {pairs.map((pair) => {
@@ -330,15 +396,22 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
                   pair={pair}
                   rule={rule}
                   headers={accounting.headers}
-                  onValueColumnChange={(column) => handleValueColumnChange(key, column)}
-                  onFilterColumnChange={(filterId, column) =>
-                    handleFilterColumnChange(key, filterId, column)
+                  onPartSignChange={(partId, sign) => handlePartSignChange(key, partId, sign)}
+                  onPartColumnChange={(partId, column) =>
+                    handlePartColumnChange(key, partId, column)
                   }
-                  onFilterValuesChange={(filterId, valuesText) =>
-                    handleFilterValuesChange(key, filterId, valuesText)
+                  onAddPart={(sign) => handleAddPart(key, sign)}
+                  onRemovePart={(partId) => handleRemovePart(key, partId)}
+                  onAddFilter={(partId) => handleAddFilter(key, partId)}
+                  onRemoveFilter={(partId, filterId) =>
+                    handleRemoveFilter(key, partId, filterId)
                   }
-                  onAddFilter={() => handleAddFilter(key)}
-                  onRemoveFilter={(filterId) => handleRemoveFilter(key, filterId)}
+                  onFilterColumnChange={(partId, filterId, column) =>
+                    handleFilterColumnChange(key, partId, filterId, column)
+                  }
+                  onFilterValuesChange={(partId, filterId, valuesText) =>
+                    handleFilterValuesChange(key, partId, filterId, valuesText)
+                  }
                   onClearRule={() => handleClearRule(key)}
                   disabled={running}
                 />
@@ -362,7 +435,7 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
                   disabled={!canRun}
                   title={
                     configuredCount === 0
-                      ? 'Configure at least one pair with a value column and filters.'
+                      ? 'Give at least one pair a value column.'
                       : 'Stream the accounting file and check the sums.'
                   }
                 >
@@ -407,18 +480,10 @@ export function AccountingReconcile({ pairs, onResultsChange }) {
                         <div className="text-xs text-base-content/60">↔ {row.colB}</div>
                       </td>
                       <td className="text-xs">
-                        {row.valueColumn ? (
-                          <>
-                            <div>
-                              <span className="text-base-content/60">Σ </span>
-                              <span className="font-mono font-medium">{row.valueColumn}</span>
-                            </div>
-                            {row.filterSummary ? (
-                              <div className="text-base-content/70 font-mono">
-                                where {row.filterSummary}
-                              </div>
-                            ) : null}
-                          </>
+                        {row.expression ? (
+                          <div className="font-mono whitespace-pre-wrap break-words">
+                            {row.expression}
+                          </div>
                         ) : (
                           <span className="text-base-content/50">— not configured —</span>
                         )}
@@ -469,14 +534,32 @@ function PairRuleCard({
   pair,
   rule,
   headers,
-  onValueColumnChange,
-  onFilterColumnChange,
-  onFilterValuesChange,
+  onPartSignChange,
+  onPartColumnChange,
+  onAddPart,
+  onRemovePart,
   onAddFilter,
   onRemoveFilter,
+  onFilterColumnChange,
+  onFilterValuesChange,
   onClearRule,
   disabled
 }) {
+  const preview = formatRuleExpression(
+    rule.parts
+      .filter((part) => part.column)
+      .map((part) => ({
+        sign: part.sign,
+        column: part.column,
+        filters: part.filters
+          .map((filter) => ({
+            column: filter.column,
+            values: parseFilterValues(filter.valuesText)
+          }))
+          .filter((filter) => filter.column && filter.values.size > 0)
+      }))
+  );
+
   return (
     <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
       <div className="flex items-start justify-between flex-wrap gap-2 mb-3">
@@ -498,63 +581,165 @@ function PairRuleCard({
         </button>
       </div>
 
-      <div className="mb-3">
-        <SearchableSelect
-          label="Value column to sum"
-          value={rule.valueColumn}
-          options={headers}
-          onChange={onValueColumnChange}
-          disabled={disabled}
-          placeholder="Pick the column that holds the amount…"
-        />
-      </div>
-
-      <div className="text-xs font-medium text-base-content/70 mb-1">
-        Filters (all must match)
-      </div>
-      <div className="flex flex-col gap-2">
-        {rule.filters.map((filter, index) => (
-          <div
-            key={filter.id}
-            className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] md:items-end"
-          >
-            <SearchableSelect
-              value={filter.column}
-              options={headers}
-              onChange={(value) => onFilterColumnChange(filter.id, value)}
-              placeholder="Column name…"
-              disabled={disabled}
-            />
-            <input
-              type="text"
-              className="input input-bordered w-full text-sm min-h-12"
-              value={filter.valuesText}
-              onChange={(event) => onFilterValuesChange(filter.id, event.target.value)}
-              placeholder="Allowed values, comma-separated (e.g. 2134, 235)"
-              disabled={disabled}
-            />
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={() => onRemoveFilter(filter.id)}
-              disabled={disabled}
-              aria-label={`Remove filter row ${index + 1}`}
-            >
-              Remove
-            </button>
-          </div>
+      <div className="flex flex-col gap-3">
+        {rule.parts.map((part, index) => (
+          <PartCard
+            key={part.id}
+            index={index}
+            part={part}
+            headers={headers}
+            disabled={disabled}
+            onSignChange={(sign) => onPartSignChange(part.id, sign)}
+            onColumnChange={(column) => onPartColumnChange(part.id, column)}
+            onRemovePart={() => onRemovePart(part.id)}
+            onAddFilter={() => onAddFilter(part.id)}
+            onRemoveFilter={(filterId) => onRemoveFilter(part.id, filterId)}
+            onFilterColumnChange={(filterId, column) =>
+              onFilterColumnChange(part.id, filterId, column)
+            }
+            onFilterValuesChange={(filterId, valuesText) =>
+              onFilterValuesChange(part.id, filterId, valuesText)
+            }
+          />
         ))}
       </div>
 
-      <div className="mt-2">
+      <div className="mt-3 flex items-center justify-between flex-wrap gap-2">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className="btn btn-xs btn-success btn-outline"
+            onClick={() => onAddPart(1)}
+            disabled={disabled}
+          >
+            + Add (sum a column)
+          </button>
+          <button
+            type="button"
+            className="btn btn-xs btn-error btn-outline"
+            onClick={() => onAddPart(-1)}
+            disabled={disabled}
+          >
+            − Subtract (subtract a column)
+          </button>
+        </div>
+        {preview ? (
+          <div className="text-xs text-base-content/60 font-mono truncate max-w-full">
+            = {preview}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function PartCard({
+  index,
+  part,
+  headers,
+  disabled,
+  onSignChange,
+  onColumnChange,
+  onRemovePart,
+  onAddFilter,
+  onRemoveFilter,
+  onFilterColumnChange,
+  onFilterValuesChange
+}) {
+  const signIsAdd = part.sign !== -1;
+  const stripeClass = signIsAdd
+    ? 'border-success/40 bg-success/5'
+    : 'border-error/40 bg-error/5';
+
+  return (
+    <div className={`rounded-lg border ${stripeClass} p-3`}>
+      <div className="grid gap-2 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-end">
+        <label className="form-control w-full md:w-40">
+          <span className="label label-text-alt text-base-content/70 pb-1">
+            Operation
+          </span>
+          <select
+            className="select select-bordered select-sm min-h-12"
+            value={signIsAdd ? '1' : '-1'}
+            onChange={(event) => onSignChange(event.target.value === '-1' ? -1 : 1)}
+            disabled={disabled}
+          >
+            <option value="1">Add (+)</option>
+            <option value="-1">Subtract (−)</option>
+          </select>
+        </label>
+        <div>
+          <div className="label pb-1">
+            <span className="label-text-alt text-base-content/70">
+              Column to sum
+            </span>
+          </div>
+          <SearchableSelect
+            value={part.column}
+            options={headers}
+            onChange={onColumnChange}
+            placeholder={index === 0 ? 'Pick the value column (e.g. amount)…' : 'Column…'}
+            disabled={disabled}
+          />
+        </div>
         <button
           type="button"
-          className="btn btn-xs btn-outline"
-          onClick={onAddFilter}
+          className="btn btn-ghost btn-sm"
+          onClick={onRemovePart}
           disabled={disabled}
+          aria-label={`Remove part ${index + 1}`}
         >
-          + Add filter
+          Remove part
         </button>
+      </div>
+
+      <div className="mt-3">
+        <div className="text-[11px] font-medium text-base-content/70 mb-1 uppercase tracking-wide">
+          Filters for this part (all must match)
+        </div>
+        <div className="flex flex-col gap-2">
+          {part.filters.map((filter, filterIndex) => (
+            <div
+              key={filter.id}
+              className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] md:items-end"
+            >
+              <SearchableSelect
+                value={filter.column}
+                options={headers}
+                onChange={(value) => onFilterColumnChange(filter.id, value)}
+                placeholder="Filter column…"
+                disabled={disabled}
+              />
+              <input
+                type="text"
+                className="input input-bordered w-full text-sm min-h-12"
+                value={filter.valuesText}
+                onChange={(event) => onFilterValuesChange(filter.id, event.target.value)}
+                placeholder="Allowed values, comma-separated (e.g. 2134, 235)"
+                disabled={disabled}
+              />
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => onRemoveFilter(filter.id)}
+                disabled={disabled}
+                aria-label={`Remove filter ${filterIndex + 1} in part ${index + 1}`}
+              >
+                Remove filter
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="mt-2">
+          <button
+            type="button"
+            className="btn btn-xs btn-outline"
+            onClick={onAddFilter}
+            disabled={disabled}
+          >
+            + Add filter to this part
+          </button>
+        </div>
       </div>
     </div>
   );

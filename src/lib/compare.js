@@ -66,26 +66,36 @@ export async function computeFileSums(file, columns, { onProgress, signal } = {}
   };
 }
 
-// Streams a single file once and computes, for each pair spec, the sum of the
-// pair's `valueColumn` restricted to rows where every filter passes. A filter
-// passes when the row's cell for `column` (trimmed, lower-cased) matches any
-// entry in the pair's allowed-values set. Pairs with no valueColumn or no
-// active filter columns are ignored (still take zero cost per row).
+// Streams a single file once and evaluates, for each pair spec, a formula made
+// of one or more signed "parts". Each part has its own value column AND its
+// own filter set, e.g.:
+//   + Σ(amount WHERE glcode ∈ {2134,235})
+//   − Σ(refund WHERE transactiontype ∈ {1})
+// The pair's accounting total is the signed sum of its parts.
 //
 // pairSpecs: Array<{
 //   key: string,
-//   valueColumn: string,
-//   filters: Array<{ column: string, values: Set<string> }>
+//   parts: Array<{
+//     sign: 1 | -1,
+//     column: string,
+//     filters: Array<{ column: string, values: Set<string> }>
+//   }>
 // }>
+//
+// Blank/missing cells contribute 0. Truly non-numeric cells (e.g. "abc") also
+// contribute 0 but are counted in `nonNumericSkipped` so the UI can warn.
 export async function computeFilteredSums(file, pairSpecs, { onProgress, signal } = {}) {
   const byPair = {};
   pairSpecs.forEach((spec) => {
     byPair[spec.key] = {
-      sum: 0,
+      totalSum: 0,
       matchedRows: 0,
       nonNumericSkipped: 0,
-      valueColumnMissing: false,
-      missingFilterColumns: []
+      missingColumns: [], // aggregated across all parts
+      parts: spec.parts.map(() => ({
+        sum: 0,
+        matchedRows: 0
+      }))
     };
   });
 
@@ -105,27 +115,32 @@ export async function computeFilteredSums(file, pairSpecs, { onProgress, signal 
 
         pairSpecs.forEach((spec) => {
           const info = byPair[spec.key];
-          const valueIdx = spec.valueColumn ? headerIndex.get(spec.valueColumn) : undefined;
-          if (spec.valueColumn && (valueIdx === undefined || valueIdx < 0)) {
-            info.valueColumnMissing = true;
-          }
-
-          const activeFilters = [];
-          spec.filters.forEach((filter) => {
-            if (!filter.column || filter.values.size === 0) return;
-            const columnIdx = headerIndex.get(filter.column);
-            if (columnIdx === undefined || columnIdx < 0) {
-              info.missingFilterColumns.push(filter.column);
+          const activeParts = [];
+          spec.parts.forEach((part, partIndex) => {
+            if (!part.column) return;
+            const valueIdx = headerIndex.get(part.column);
+            if (valueIdx === undefined || valueIdx < 0) {
+              info.missingColumns.push(part.column);
               return;
             }
-            activeFilters.push({ columnIdx, values: filter.values });
+            const activeFilters = [];
+            part.filters.forEach((filter) => {
+              if (!filter.column || filter.values.size === 0) return;
+              const columnIdx = headerIndex.get(filter.column);
+              if (columnIdx === undefined || columnIdx < 0) {
+                info.missingColumns.push(filter.column);
+                return;
+              }
+              activeFilters.push({ columnIdx, values: filter.values });
+            });
+            activeParts.push({
+              partIndex,
+              sign: part.sign === -1 ? -1 : 1,
+              valueIdx,
+              filters: activeFilters
+            });
           });
-
-          perPair.set(spec.key, {
-            valueIdx: valueIdx ?? -1,
-            filters: activeFilters,
-            info
-          });
+          perPair.set(spec.key, { parts: activeParts, info });
         });
         return;
       }
@@ -133,23 +148,32 @@ export async function computeFilteredSums(file, pairSpecs, { onProgress, signal 
       rowCount += 1;
 
       for (const [, spec] of perPair) {
-        if (spec.valueIdx < 0) continue;
-        let pass = true;
-        for (const filter of spec.filters) {
-          const cell = (fields[filter.columnIdx] ?? '').trim().toLowerCase();
-          if (!filter.values.has(cell)) {
-            pass = false;
-            break;
+        for (const part of spec.parts) {
+          let pass = true;
+          for (const filter of part.filters) {
+            const cell = (fields[filter.columnIdx] ?? '').trim().toLowerCase();
+            if (!filter.values.has(cell)) {
+              pass = false;
+              break;
+            }
           }
-        }
-        if (!pass) continue;
-        const raw = fields[spec.valueIdx];
-        const parsed = parseNumber(raw);
-        if (parsed.ok) {
-          spec.info.sum += parsed.value;
-          spec.info.matchedRows += 1;
-        } else if (raw !== undefined && String(raw).trim() !== '') {
-          spec.info.nonNumericSkipped += 1;
+          if (!pass) continue;
+          const raw = fields[part.valueIdx];
+          if (raw === undefined || String(raw).trim() === '') {
+            spec.info.parts[part.partIndex].matchedRows += 1;
+            spec.info.matchedRows += 1;
+            continue;
+          }
+          const parsed = parseNumber(raw);
+          if (parsed.ok) {
+            const contribution = part.sign * parsed.value;
+            spec.info.parts[part.partIndex].sum += contribution;
+            spec.info.parts[part.partIndex].matchedRows += 1;
+            spec.info.totalSum += contribution;
+            spec.info.matchedRows += 1;
+          } else {
+            spec.info.nonNumericSkipped += 1;
+          }
         }
       }
     },
@@ -263,8 +287,7 @@ export function buildSummaryCsv({ metadata, results, reconciliation } = {}) {
       'Column in File A',
       'Column in File B',
       'Difference (File A - File B)',
-      'Accounting value column summed',
-      'Filters applied',
+      'Accounting expression summed',
       'Sum from accounting file',
       'Rows matched in accounting file',
       'Remaining delta (Difference - Sum)',
@@ -284,8 +307,7 @@ export function buildSummaryCsv({ metadata, results, reconciliation } = {}) {
         row.colA,
         row.colB,
         row.diff,
-        row.valueColumn ?? '',
-        row.filterSummary ?? '',
+        row.expression ?? '',
         row.accountingSum ?? '',
         row.accountingSum === null || row.accountingSum === undefined ? '' : row.matchedRows ?? 0,
         row.delta ?? '',
