@@ -36,7 +36,7 @@ function emptyRule() {
   return { valueColumn: '', filters: [{ id: nextFilterId(), column: '', valuesText: '' }] };
 }
 
-export function AccountingReconcile({ pairs }) {
+export function AccountingReconcile({ pairs, onResultsChange }) {
   const [accounting, setAccounting] = useState(emptyFile);
   const [peeking, setPeeking] = useState(false);
   const [rules, setRules] = useState({});
@@ -56,6 +56,20 @@ export function AccountingReconcile({ pairs }) {
     setRules(fresh);
     setReconResults(null);
   }, [pairs]);
+
+  // Notify the parent so it can include recon data in the downloadable summary.
+  useEffect(() => {
+    if (!onResultsChange) return;
+    if (!reconResults) {
+      onResultsChange(null);
+      return;
+    }
+    onResultsChange({
+      fileName: accounting.name,
+      rowCount: reconResults.rowCount,
+      rows: reconResults.rows
+    });
+  }, [reconResults, accounting.name, onResultsChange]);
 
   const pairSpecs = useMemo(
     () =>

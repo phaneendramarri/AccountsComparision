@@ -30,9 +30,20 @@ export function useSavedPairs() {
     setSavedPairs((current) => current.filter((item) => item.id !== id));
   }, []);
 
+  const renamePair = useCallback((id, label) => {
+    const trimmed = (label || '').trim();
+    setSavedPairs((current) =>
+      current.map((item) =>
+        item.id === id
+          ? { ...item, label: trimmed || buildDefaultLabel(item.comparisons) }
+          : item
+      )
+    );
+  }, []);
+
   const clearAll = useCallback(() => setSavedPairs([]), []);
 
-  return { savedPairs, savePair, removePair, clearAll };
+  return { savedPairs, savePair, renamePair, removePair, clearAll };
 }
 
 function buildDefaultLabel(comparisons) {

@@ -17,6 +17,9 @@ export function PairBuilder({
   const [pendingColA, setPendingColA] = useState('');
   const [pendingColB, setPendingColB] = useState('');
   const [bulkSelection, setBulkSelection] = useState([]);
+  const [matchedCollapsed, setMatchedCollapsed] = useState(false);
+  const [savePromptOpen, setSavePromptOpen] = useState(false);
+  const [saveLabel, setSaveLabel] = useState('');
 
   const canAdd = Boolean(pendingColA && pendingColB);
 
@@ -48,6 +51,22 @@ export function PairBuilder({
     onAddPairs(remaining.map((name) => ({ colA: name, colB: name })));
   }
 
+  function handleOpenSavePrompt() {
+    setSaveLabel('');
+    setSavePromptOpen(true);
+  }
+
+  function handleConfirmSave() {
+    onSave(saveLabel.trim());
+    setSaveLabel('');
+    setSavePromptOpen(false);
+  }
+
+  function handleCancelSave() {
+    setSaveLabel('');
+    setSavePromptOpen(false);
+  }
+
   return (
     <section className="card bg-base-100 border border-base-300 shadow-sm">
       <div className="card-body gap-5">
@@ -70,14 +89,51 @@ export function PairBuilder({
             <button
               type="button"
               className="btn btn-sm btn-outline"
-              onClick={onSave}
-              disabled={!canSave}
-              title="Remember these pairs so you can apply them to future uploads"
+              onClick={handleOpenSavePrompt}
+              disabled={!canSave || savePromptOpen}
+              title="Store these pairs in your browser so you can reuse them later"
             >
-              Save pairs
+              Save to local settings
             </button>
           </div>
         </div>
+
+        {savePromptOpen ? (
+          <div className="rounded-xl border border-primary/40 bg-primary/5 p-4">
+            <div className="text-sm font-semibold mb-2">Save current pairs</div>
+            <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-center">
+              <input
+                type="text"
+                className="input input-bordered w-full min-h-12"
+                placeholder="Give this setup a name (optional)…"
+                value={saveLabel}
+                onChange={(event) => setSaveLabel(event.target.value)}
+                autoFocus
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleConfirmSave();
+                  if (event.key === 'Escape') handleCancelSave();
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleConfirmSave}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={handleCancelSave}
+              >
+                Cancel
+              </button>
+            </div>
+            <p className="text-xs text-base-content/60 mt-2">
+              Saved to your browser only. Nothing is sent anywhere. Leave the name empty to auto-generate one.
+            </p>
+          </div>
+        ) : null}
 
         {commonColumns.length > 0 ? (
           <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
@@ -106,26 +162,53 @@ export function PairBuilder({
 
         <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-            <div>
-              <div className="text-sm font-semibold">Matched columns</div>
-              <div className="text-xs text-base-content/60">
-                {commonColumns.length > 0
-                  ? `${commonColumns.length} column${commonColumns.length === 1 ? '' : 's'} share the same name in both files. Click to add as a pair.`
-                  : 'No columns share the same name across the two files.'}
-              </div>
-            </div>
-            {commonColumns.length > 0 ? (
-              <button
-                type="button"
-                className="btn btn-xs btn-outline"
-                onClick={handleAddAllMatched}
-                disabled={commonColumns.every((name) => selectedMatchedSet.has(name))}
+            <button
+              type="button"
+              className="flex items-center gap-2 text-left min-w-0"
+              onClick={() => setMatchedCollapsed((current) => !current)}
+              aria-expanded={!matchedCollapsed}
+            >
+              <span
+                aria-hidden="true"
+                className={[
+                  'inline-block transition-transform text-base-content/60',
+                  matchedCollapsed ? '' : 'rotate-90'
+                ].join(' ')}
               >
-                Add all
-              </button>
-            ) : null}
+                ▶
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold">Matched columns</span>
+                <span className="block text-xs text-base-content/60">
+                  {commonColumns.length > 0
+                    ? `${commonColumns.length} column${commonColumns.length === 1 ? '' : 's'} share the same name in both files. Click to add as a pair.`
+                    : 'No columns share the same name across the two files.'}
+                </span>
+              </span>
+            </button>
+            <div className="flex items-center gap-2">
+              {commonColumns.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline"
+                  onClick={handleAddAllMatched}
+                  disabled={commonColumns.every((name) => selectedMatchedSet.has(name))}
+                >
+                  Add all
+                </button>
+              ) : null}
+              {commonColumns.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn btn-xs btn-ghost"
+                  onClick={() => setMatchedCollapsed((current) => !current)}
+                >
+                  {matchedCollapsed ? 'Show' : 'Hide'}
+                </button>
+              ) : null}
+            </div>
           </div>
-          {commonColumns.length > 0 ? (
+          {!matchedCollapsed && commonColumns.length > 0 ? (
             <div className="flex flex-wrap gap-2">
               {commonColumns.map((name) => {
                 const isSelected = selectedMatchedSet.has(name);

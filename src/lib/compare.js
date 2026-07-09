@@ -175,24 +175,126 @@ export function buildPairResults({ comparisons, resultA, resultB }) {
   }));
 }
 
-export function buildSummaryCsv({ comparisons, results }) {
-  const headers = ['File A column', 'File B column', 'Sum A', 'Sum B', 'A - B', 'Numeric A', 'Numeric B'];
-  const lines = [headers.map(escapeCsv).join(',')];
-  results.forEach((row) => {
-    lines.push(
-      [
+// Build a human-readable CSV summary that Excel/Sheets can open directly.
+// Sections are separated by blank rows and each has its own header row so the
+// file self-documents. When `reconciliation` is provided a second table is
+// appended with the per-pair accounting check.
+//
+// Inputs:
+//   metadata: {
+//     generatedAt?: Date,
+//     fileA: { name, rows },
+//     fileB: { name, rows },
+//     accounting?: { name, rowsScanned }
+//   }
+//   comparisons: unused (kept for backward compatibility)
+//   results:  Array of buildPairResults rows
+//   reconciliation?: {
+//     rowCount: number,
+//     rows: Array<{
+//       colA, colB, diff, valueColumn, filterSummary,
+//       accountingSum, matchedRows, delta, status, note
+//     }>
+//   }
+export function buildSummaryCsv({ metadata, results, reconciliation } = {}) {
+  const lines = [];
+  const pushRow = (cells) => lines.push(cells.map(escapeCsv).join(','));
+  const pushBlank = () => lines.push('');
+
+  const generatedAt = metadata?.generatedAt ?? new Date();
+
+  // Report metadata
+  pushRow(['Report']);
+  pushRow(['Generated at', generatedAt.toISOString()]);
+  if (metadata?.fileA) {
+    pushRow(['File A name', metadata.fileA.name ?? '']);
+    pushRow(['File A rows', metadata.fileA.rows ?? '']);
+  }
+  if (metadata?.fileB) {
+    pushRow(['File B name', metadata.fileB.name ?? '']);
+    pushRow(['File B rows', metadata.fileB.rows ?? '']);
+  }
+  if (metadata?.accounting) {
+    pushRow(['Accounting file name', metadata.accounting.name ?? '']);
+    pushRow(['Accounting rows scanned', metadata.accounting.rowsScanned ?? '']);
+  }
+  pushBlank();
+
+  // Column comparison
+  pushRow(['Column comparison (File A vs File B)']);
+  pushRow([
+    'Column in File A',
+    'Column in File B',
+    'Sum in File A',
+    'Sum in File B',
+    'Difference (File A - File B)',
+    'Numeric rows summed in File A',
+    'Numeric rows summed in File B',
+    'Non-numeric rows skipped in File A',
+    'Non-numeric rows skipped in File B',
+    'Match status'
+  ]);
+  (results ?? []).forEach((row) => {
+    const matches = Math.abs(row.diff) < 0.005;
+    pushRow([
+      row.colA,
+      row.colB,
+      row.sumA,
+      row.sumB,
+      row.diff,
+      row.countA,
+      row.countB,
+      row.nonNumericA,
+      row.nonNumericB,
+      matches ? 'Match' : 'Difference'
+    ]);
+  });
+
+  // Accounting reconciliation (optional)
+  if (reconciliation && Array.isArray(reconciliation.rows) && reconciliation.rows.length > 0) {
+    pushBlank();
+    pushRow(['Accounting reconciliation']);
+    pushRow([
+      'Accounting rows scanned',
+      reconciliation.rowCount ?? ''
+    ]);
+    pushBlank();
+    pushRow([
+      'Column in File A',
+      'Column in File B',
+      'Difference (File A - File B)',
+      'Accounting value column summed',
+      'Filters applied',
+      'Sum from accounting file',
+      'Rows matched in accounting file',
+      'Remaining delta (Difference - Sum)',
+      'Status',
+      'Notes'
+    ]);
+    reconciliation.rows.forEach((row) => {
+      const statusLabel =
+        row.status === 'match'
+          ? 'Match'
+          : row.status === 'mismatch'
+            ? 'Off by ' + row.delta
+            : row.status === 'error'
+              ? 'Rule error'
+              : 'Skipped';
+      pushRow([
         row.colA,
         row.colB,
-        row.sumA,
-        row.sumB,
         row.diff,
-        row.countA,
-        row.countB
-      ]
-        .map(escapeCsv)
-        .join(',')
-    );
-  });
+        row.valueColumn ?? '',
+        row.filterSummary ?? '',
+        row.accountingSum ?? '',
+        row.accountingSum === null || row.accountingSum === undefined ? '' : row.matchedRows ?? 0,
+        row.delta ?? '',
+        statusLabel,
+        row.note ?? ''
+      ]);
+    });
+  }
+
   return lines.join('\r\n');
 }
 

@@ -20,7 +20,7 @@ const emptySlot = { file: null, name: '', size: 0, headers: [] };
 
 export default function App() {
   const { theme, toggle } = useTheme();
-  const { savedPairs, savePair, removePair, clearAll } = useSavedPairs();
+  const { savedPairs, savePair, renamePair, removePair, clearAll } = useSavedPairs();
 
   const [fileA, setFileA] = useState(emptySlot);
   const [fileB, setFileB] = useState(emptySlot);
@@ -33,6 +33,7 @@ export default function App() {
   const [progressA, setProgressA] = useState(0);
   const [progressB, setProgressB] = useState(0);
   const [results, setResults] = useState(null);
+  const [reconciliation, setReconciliation] = useState(null);
   const [error, setError] = useState('');
   const abortRef = useRef(null);
 
@@ -113,9 +114,9 @@ export default function App() {
     setResults(null);
   }, []);
 
-  const handleSavePairs = useCallback(() => {
+  const handleSavePairs = useCallback((label) => {
     if (comparisons.length === 0) return;
-    savePair(comparisons);
+    savePair(comparisons, label);
   }, [comparisons, savePair]);
 
   const handleApplySaved = useCallback((setup) => {
@@ -129,6 +130,7 @@ export default function App() {
     setFileB(emptySlot);
     setComparisons([]);
     setResults(null);
+    setReconciliation(null);
     setError('');
     setProgressA(0);
     setProgressB(0);
@@ -141,6 +143,7 @@ export default function App() {
   const handleRun = useCallback(async () => {
     if (!canRun) return;
     setResults(null);
+    setReconciliation(null);
     setError('');
     setProgressA(0);
     setProgressB(0);
@@ -182,9 +185,23 @@ export default function App() {
 
   const handleDownload = useCallback(() => {
     if (!results) return;
-    const csv = buildSummaryCsv({ comparisons, results: results.pairs });
-    downloadCsv('csv-diff-summary.csv', csv);
-  }, [comparisons, results]);
+    const csv = buildSummaryCsv({
+      metadata: {
+        generatedAt: new Date(),
+        fileA: { name: fileA.name, rows: results.rowCountA },
+        fileB: { name: fileB.name, rows: results.rowCountB },
+        accounting: reconciliation
+          ? { name: reconciliation.fileName, rowsScanned: reconciliation.rowCount }
+          : undefined
+      },
+      results: results.pairs,
+      reconciliation: reconciliation
+        ? { rowCount: reconciliation.rowCount, rows: reconciliation.rows }
+        : null
+    });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    downloadCsv(`accounts-comparison-summary-${stamp}.csv`, csv);
+  }, [fileA.name, fileB.name, reconciliation, results]);
 
   return (
     <div className="min-h-full bg-base-200 text-base-content">
@@ -228,6 +245,7 @@ export default function App() {
             headersB={fileB.headers}
             onApply={handleApplySaved}
             onRemove={removePair}
+            onRename={renamePair}
             onClearAll={clearAll}
             disabled={running}
           />
@@ -299,7 +317,10 @@ export default function App() {
               rowCountB={results.rowCountB}
               pairs={results.pairs}
             />
-            <AccountingReconcile pairs={results.pairs} />
+            <AccountingReconcile
+              pairs={results.pairs}
+              onResultsChange={setReconciliation}
+            />
             <div className="flex flex-wrap justify-end gap-2">
               <button type="button" className="btn btn-primary" onClick={handleDownload}>
                 Download summary CSV
