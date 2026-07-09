@@ -26,8 +26,6 @@ export default function App() {
   const [peekingA, setPeekingA] = useState(false);
   const [peekingB, setPeekingB] = useState(false);
 
-  const [pendingColA, setPendingColA] = useState('');
-  const [pendingColB, setPendingColB] = useState('');
   const [comparisons, setComparisons] = useState([]);
 
   const [running, setRunning] = useState(false);
@@ -48,6 +46,12 @@ export default function App() {
     () => Array.from(new Set(comparisons.map((pair) => pair.colB))),
     [comparisons]
   );
+
+  const commonColumns = useMemo(() => {
+    if (!bothFilesReady) return [];
+    const setB = new Set(fileB.headers);
+    return fileA.headers.filter((header) => setB.has(header));
+  }, [bothFilesReady, fileA.headers, fileB.headers]);
 
   const handleFileChange = useCallback(async (slot, event) => {
     const file = event.target.files?.[0];
@@ -73,18 +77,39 @@ export default function App() {
     }
   }, []);
 
-  const handleAddPair = useCallback(() => {
-    if (!pendingColA || !pendingColB) return;
+  const handleAddPair = useCallback((pair) => {
+    if (!pair?.colA || !pair?.colB) return;
     setComparisons((current) => {
       const exists = current.some(
-        (pair) => pair.colA === pendingColA && pair.colB === pendingColB
+        (existing) => existing.colA === pair.colA && existing.colB === pair.colB
       );
-      return exists ? current : [...current, { colA: pendingColA, colB: pendingColB }];
+      return exists ? current : [...current, { colA: pair.colA, colB: pair.colB }];
     });
-  }, [pendingColA, pendingColB]);
+  }, []);
+
+  const handleAddPairs = useCallback((incoming) => {
+    if (!incoming?.length) return;
+    setComparisons((current) => {
+      const seen = new Set(current.map((pair) => `${pair.colA}::${pair.colB}`));
+      const additions = [];
+      incoming.forEach((pair) => {
+        const key = `${pair.colA}::${pair.colB}`;
+        if (!seen.has(key)) {
+          additions.push({ colA: pair.colA, colB: pair.colB });
+          seen.add(key);
+        }
+      });
+      return additions.length ? [...current, ...additions] : current;
+    });
+  }, []);
 
   const handleRemovePair = useCallback((index) => {
     setComparisons((current) => current.filter((_, position) => position !== index));
+  }, []);
+
+  const handleClearPairs = useCallback(() => {
+    setComparisons([]);
+    setResults(null);
   }, []);
 
   const handleSavePairs = useCallback(() => {
@@ -94,8 +119,6 @@ export default function App() {
 
   const handleApplySaved = useCallback((setup) => {
     setComparisons(setup.comparisons.map((pair) => ({ ...pair })));
-    setPendingColA('');
-    setPendingColB('');
     setResults(null);
   }, []);
 
@@ -103,8 +126,6 @@ export default function App() {
     if (running) abortRef.current?.abort();
     setFileA(emptySlot);
     setFileB(emptySlot);
-    setPendingColA('');
-    setPendingColB('');
     setComparisons([]);
     setResults(null);
     setError('');
@@ -200,30 +221,31 @@ export default function App() {
         </section>
 
         {bothFilesReady ? (
-          <PairBuilder
+          <SavedPairsPanel
+            savedPairs={savedPairs}
             headersA={fileA.headers}
             headersB={fileB.headers}
-            pendingColA={pendingColA}
-            pendingColB={pendingColB}
-            onChangePendingA={setPendingColA}
-            onChangePendingB={setPendingColB}
-            onAdd={handleAddPair}
-            onSave={handleSavePairs}
-            comparisons={comparisons}
-            onRemoveComparison={handleRemovePair}
-            canSave={comparisons.length > 0}
+            onApply={handleApplySaved}
+            onRemove={removePair}
+            onClearAll={clearAll}
+            disabled={running}
           />
         ) : null}
 
-        <SavedPairsPanel
-          savedPairs={savedPairs}
-          headersA={fileA.headers}
-          headersB={fileB.headers}
-          onApply={handleApplySaved}
-          onRemove={removePair}
-          onClearAll={clearAll}
-          disabled={running}
-        />
+        {bothFilesReady ? (
+          <PairBuilder
+            headersA={fileA.headers}
+            headersB={fileB.headers}
+            commonColumns={commonColumns}
+            comparisons={comparisons}
+            onAddPair={handleAddPair}
+            onAddPairs={handleAddPairs}
+            onRemoveComparison={handleRemovePair}
+            onClearAll={handleClearPairs}
+            onSave={handleSavePairs}
+            canSave={comparisons.length > 0}
+          />
+        ) : null}
 
         {bothFilesReady && comparisons.length > 0 ? (
           <section className="card bg-base-100 border border-base-300 shadow-sm">
