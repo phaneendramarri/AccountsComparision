@@ -4,6 +4,7 @@ import { FileUpload } from './components/FileUpload';
 import { PairBuilder } from './components/PairBuilder';
 import { SavedPairsPanel } from './components/SavedPairsPanel';
 import { ResultsSummary } from './components/ResultsSummary';
+import { AccountingReconcile } from './components/AccountingReconcile';
 import { ProgressBar } from './components/ProgressBar';
 import { useTheme } from './hooks/useTheme';
 import { useSavedPairs } from './hooks/useSavedPairs';
@@ -298,6 +299,7 @@ export default function App() {
               rowCountB={results.rowCountB}
               pairs={results.pairs}
             />
+            <AccountingReconcile pairs={results.pairs} />
             <div className="flex flex-wrap justify-end gap-2">
               <button type="button" className="btn btn-primary" onClick={handleDownload}>
                 Download summary CSV

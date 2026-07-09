@@ -20,6 +20,10 @@ export function PairBuilder({
 
   const canAdd = Boolean(pendingColA && pendingColB);
 
+  const selectedMatchedSet = new Set(
+    comparisons.filter((pair) => pair.colA === pair.colB).map((pair) => pair.colA)
+  );
+
   function handleAddPair() {
     if (!canAdd) return;
     onAddPair({ colA: pendingColA, colB: pendingColB });
@@ -31,6 +35,17 @@ export function PairBuilder({
     if (bulkSelection.length === 0) return;
     onAddPairs(bulkSelection.map((name) => ({ colA: name, colB: name })));
     setBulkSelection([]);
+  }
+
+  function handleQuickAddMatched(name) {
+    if (selectedMatchedSet.has(name)) return;
+    onAddPair({ colA: name, colB: name });
+  }
+
+  function handleAddAllMatched() {
+    const remaining = commonColumns.filter((name) => !selectedMatchedSet.has(name));
+    if (remaining.length === 0) return;
+    onAddPairs(remaining.map((name) => ({ colA: name, colB: name })));
   }
 
   return (
@@ -88,6 +103,54 @@ export function PairBuilder({
             />
           </div>
         ) : null}
+
+        <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div>
+              <div className="text-sm font-semibold">Matched columns</div>
+              <div className="text-xs text-base-content/60">
+                {commonColumns.length > 0
+                  ? `${commonColumns.length} column${commonColumns.length === 1 ? '' : 's'} share the same name in both files. Click to add as a pair.`
+                  : 'No columns share the same name across the two files.'}
+              </div>
+            </div>
+            {commonColumns.length > 0 ? (
+              <button
+                type="button"
+                className="btn btn-xs btn-outline"
+                onClick={handleAddAllMatched}
+                disabled={commonColumns.every((name) => selectedMatchedSet.has(name))}
+              >
+                Add all
+              </button>
+            ) : null}
+          </div>
+          {commonColumns.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {commonColumns.map((name) => {
+                const isSelected = selectedMatchedSet.has(name);
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => handleQuickAddMatched(name)}
+                    disabled={isSelected}
+                    className={[
+                      'badge badge-lg gap-1 py-3 cursor-pointer transition',
+                      isSelected
+                        ? 'badge-primary badge-outline cursor-default opacity-70'
+                        : 'badge-outline hover:badge-primary'
+                    ].join(' ')}
+                    title={isSelected ? `${name} is already added` : `Add ${name} as a pair`}
+                  >
+                    {isSelected ? <span aria-hidden="true">✓</span> : <span aria-hidden="true">+</span>}
+                    <span className="font-medium">{name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
 
         <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
           <div className="text-sm font-semibold mb-3">Custom pair</div>
