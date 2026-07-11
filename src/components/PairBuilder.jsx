@@ -68,35 +68,31 @@ export function PairBuilder({
   }
 
   return (
-    <section className="card bg-base-100 border border-base-300 shadow-sm">
-      <div className="card-body gap-5">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div>
-            <h2 className="card-title text-base">Pick numeric columns to sum</h2>
-            <p className="text-sm text-base-content/60">
-              Only the columns you pick are streamed and summed.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost"
-              onClick={onClearAll}
-              disabled={comparisons.length === 0}
-            >
-              Clear pairs
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline"
-              onClick={handleOpenSavePrompt}
-              disabled={!canSave || savePromptOpen}
-              title="Store these pairs in your browser so you can reuse them later"
-            >
-              Save to local settings
-            </button>
-          </div>
+    <div className="flex flex-col gap-5">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <p className="text-sm text-base-content/60">
+          Only the columns you pick are streamed and summed.
+        </p>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={onClearAll}
+            disabled={comparisons.length === 0}
+          >
+            Clear pairs
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm btn-outline"
+            onClick={handleOpenSavePrompt}
+            disabled={!canSave || savePromptOpen}
+            title="Store these pairs and their accounting rules in your browser"
+          >
+            Save setup (pairs + rules)
+          </button>
         </div>
+      </div>
 
         {savePromptOpen ? (
           <div className="rounded-xl border border-primary/40 bg-primary/5 p-4">
@@ -295,7 +291,6 @@ export function PairBuilder({
             </p>
           )}
         </div>
-      </div>
-    </section>
+    </div>
   );
 }
