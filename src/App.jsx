@@ -1,34 +1,52 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// ============================================================================
+// APP.JSX — MAIN APPLICATION CONTROLLER
+// ============================================================================
+//
+// WHAT DOES THIS FILE DO?
+// This is the "brain" of our React application. It coordinates the 5 steps:
+//
+//   Step 1: Uploading File A, File B, and Accounting CSV files.
+//   Step 2: Selecting the Key Column (Loan Account Number / ID) in each file.
+//   Step 3: Selecting which numeric columns to pair and compare between File A and B.
+//   Step 4: Defining Accounting sum formulas and filters per pair.
+//   Step 5: Running the streaming comparison in parallel and showing results.
+//
+// It also allows saving and loading your entire configuration as a JSON file!
+// ============================================================================
+
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Header } from './components/Header';
 import { FileUpload } from './components/FileUpload';
+import { KeyColumnPicker } from './components/KeyColumnPicker';
 import { PairBuilder } from './components/PairBuilder';
-import { SavedSetupsPanel } from './components/SavedSetupsPanel';
-import { ResultsSummary } from './components/ResultsSummary';
-import { AccountingReconcileConfig } from './components/AccountingReconcile';
+import { RuleEditor } from './components/RuleEditor';
+import { LoanResults } from './components/LoanResults';
 import { ProgressBar } from './components/ProgressBar';
 import { Collapsible } from './components/Collapsible';
 import { useTheme } from './hooks/useTheme';
-import { useSavedSetups } from './hooks/useSavedSetups';
 import { peekCsvHeaders } from './lib/csv';
 import {
-  buildPairResults,
-  buildSummaryCsv,
-  computeFileSums,
-  computeFilteredSums,
-  downloadCsv
-} from './lib/compare';
+  streamGroupedSums,
+  streamGroupedFilteredSums,
+  mergeLoanResults,
+  buildLoanCsv,
+  downloadCsv,
+  getPartsA,
+  getPartsB
+} from './lib/engine';
+import { dehydrateRule, emptyRule, hydrateRule, isRuleActive, ruleToPairSpec } from './lib/rules';
 import {
-  dehydrateRule,
-  emptyRule,
-  formatRulePreview,
-  hydrateRule,
-  isRuleActive,
-  ruleToPairSpec
-} from './lib/rules';
-import { formatNumber } from './lib/format';
+  Upload,
+  Download,
+  Play,
+  RotateCcw,
+  X,
+  AlertCircle,
+  FileJson,
+  Sparkles
+} from 'lucide-react';
 
 const emptySlot = { file: null, name: '', size: 0, headers: [] };
-const MATCH_EPSILON = 0.005;
 
 function pairKey(pair) {
   return `${pair.colA}::${pair.colB}`;
@@ -36,24 +54,20 @@ function pairKey(pair) {
 
 export default function App() {
   const { theme, toggle } = useTheme();
-  const {
-    setups,
-    saveSetup,
-    renameSetup,
-    removeSetup,
-    clearAll,
-    loadDefaults,
-    importSetups,
-    exportSetupJson,
-    exportAllJson
-  } = useSavedSetups();
 
+  // ==========================================================================
+  // STATE MANAGEMENT
+  // ==========================================================================
   const [fileA, setFileA] = useState(emptySlot);
   const [fileB, setFileB] = useState(emptySlot);
   const [accountingFile, setAccountingFile] = useState(emptySlot);
   const [peekingA, setPeekingA] = useState(false);
   const [peekingB, setPeekingB] = useState(false);
   const [peekingAccounting, setPeekingAccounting] = useState(false);
+
+  const [keyColA, setKeyColA] = useState('');
+  const [keyColB, setKeyColB] = useState('');
+  const [keyColAcct, setKeyColAcct] = useState('');
 
   const [comparisons, setComparisons] = useState([]);
   const [accountingRules, setAccountingRules] = useState({});
@@ -62,72 +76,25 @@ export default function App() {
   const [progressA, setProgressA] = useState(0);
   const [progressB, setProgressB] = useState(0);
   const [progressAccounting, setProgressAccounting] = useState(0);
-  const [results, setResults] = useState(null);
-  const [reconciliation, setReconciliation] = useState(null);
   const [error, setError] = useState('');
+  const [results, setResults] = useState(null);
+
   const abortRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   const bothFilesReady = Boolean(fileA.file) && Boolean(fileB.file);
-  const hasAccounting = Boolean(accountingFile.file);
-  const canRun = bothFilesReady && comparisons.length > 0 && !running;
-
-  const columnsA = useMemo(
-    () => Array.from(new Set(comparisons.map((pair) => pair.colA))),
-    [comparisons]
-  );
-  const columnsB = useMemo(
-    () => Array.from(new Set(comparisons.map((pair) => pair.colB))),
-    [comparisons]
-  );
+  const keysReady = Boolean(keyColA) && Boolean(keyColB);
+  const canRun = bothFilesReady && keysReady && comparisons.length > 0 && !running;
 
   const commonColumns = useMemo(() => {
     if (!bothFilesReady) return [];
     const setB = new Set(fileB.headers);
-    return fileA.headers.filter((header) => setB.has(header));
+    return fileA.headers.filter((h) => setB.has(h));
   }, [bothFilesReady, fileA.headers, fileB.headers]);
 
-  const activeRuleCount = useMemo(
-    () =>
-      comparisons.reduce((total, pair) => {
-        const rule = accountingRules[pairKey(pair)];
-        return total + (isRuleActive(rule) ? 1 : 0);
-      }, 0),
-    [comparisons, accountingRules]
-  );
-
-  const activeRulePartsCount = useMemo(
-    () =>
-      comparisons.reduce((total, pair) => {
-        const rule = accountingRules[pairKey(pair)];
-        if (!isRuleActive(rule)) return total;
-        return total + rule.parts.filter((part) => part.column).length;
-      }, 0),
-    [comparisons, accountingRules]
-  );
-
-  // Whenever the list of pairs changes, ensure every pair has a rule entry
-  // (fresh empty rule) and drop rules that no longer belong to any pair.
-  useEffect(() => {
-    setAccountingRules((current) => {
-      const next = {};
-      let changed = false;
-      comparisons.forEach((pair) => {
-        const key = pairKey(pair);
-        if (current[key]) {
-          next[key] = current[key];
-        } else {
-          next[key] = emptyRule();
-          changed = true;
-        }
-      });
-      // detect removed keys
-      Object.keys(current).forEach((key) => {
-        if (!(key in next)) changed = true;
-      });
-      return changed ? next : current;
-    });
-  }, [comparisons]);
-
+  // ==========================================================================
+  // HANDLERS — STEP 1: READING CSV HEADERS INSTANTLY ON UPLOAD
+  // ==========================================================================
   const handleFileChange = useCallback(async (slot, event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -136,95 +103,53 @@ export default function App() {
       slot === 'fileA'
         ? [setPeekingA, setFileA]
         : slot === 'fileB'
-          ? [setPeekingB, setFileB]
-          : [setPeekingAccounting, setAccountingFile];
+        ? [setPeekingB, setFileB]
+        : [setPeekingAccounting, setAccountingFile];
 
     setError('');
     setResults(null);
-    setReconciliation(null);
     setPeek(true);
     try {
       const headers = await peekCsvHeaders(file);
       if (headers.length === 0) {
-        throw new Error('No headers were found in the first row.');
+        throw new Error('No headers found in the first row.');
       }
       setSlot({ file, name: file.name, size: file.size, headers });
-    } catch (readError) {
+    } catch (err) {
       setSlot(emptySlot);
-      setError(readError.message || 'Could not read the file.');
+      setError(err.message || 'Could not read file headers.');
     } finally {
       setPeek(false);
     }
   }, []);
 
+  // ==========================================================================
+  // HANDLERS — STEP 2 & 3: UPDATING KEYS AND PAIRS
+  // ==========================================================================
+  const handleKeyChange = useCallback((field, value) => {
+    if (field === 'keyColA') setKeyColA(value);
+    else if (field === 'keyColB') setKeyColB(value);
+    else if (field === 'keyColAcct') setKeyColAcct(value);
+    setResults(null);
+  }, []);
+
   const handleAddPair = useCallback((pair) => {
     if (!pair?.colA || !pair?.colB) return;
-    setComparisons((current) => {
-      const exists = current.some(
-        (existing) => existing.colA === pair.colA && existing.colB === pair.colB
-      );
-      return exists ? current : [...current, { colA: pair.colA, colB: pair.colB }];
+    setComparisons((curr) => {
+      const exists = curr.some((p) => p.colA === pair.colA && p.colB === pair.colB);
+      return exists ? curr : [...curr, pair];
     });
+    setResults(null);
   }, []);
 
-  const handleAddPairs = useCallback((incoming) => {
-    if (!incoming?.length) return;
-    setComparisons((current) => {
-      const seen = new Set(current.map((pair) => `${pair.colA}::${pair.colB}`));
-      const additions = [];
-      incoming.forEach((pair) => {
-        const key = `${pair.colA}::${pair.colB}`;
-        if (!seen.has(key)) {
-          additions.push({ colA: pair.colA, colB: pair.colB });
-          seen.add(key);
-        }
-      });
-      return additions.length ? [...current, ...additions] : current;
-    });
-  }, []);
-
-  const handleRemovePair = useCallback((index) => {
-    setComparisons((current) => current.filter((_, position) => position !== index));
+  const handleRemovePair = useCallback((idx) => {
+    setComparisons((curr) => curr.filter((_, i) => i !== idx));
+    setResults(null);
   }, []);
 
   const handleClearPairs = useCallback(() => {
     setComparisons([]);
     setResults(null);
-    setReconciliation(null);
-  }, []);
-
-  const handleRulesChange = useCallback((nextMap) => {
-    setAccountingRules(nextMap);
-    setReconciliation(null);
-  }, []);
-
-  const handleSaveSetup = useCallback(
-    (label) => {
-      if (comparisons.length === 0) return;
-      const dehydrated = {};
-      comparisons.forEach((pair) => {
-        const key = pairKey(pair);
-        const rule = accountingRules[key];
-        if (rule) dehydrated[key] = dehydrateRule(rule);
-      });
-      saveSetup({
-        label,
-        pairs: comparisons,
-        accountingRules: dehydrated
-      });
-    },
-    [comparisons, accountingRules, saveSetup]
-  );
-
-  const handleApplySetup = useCallback((setup) => {
-    setComparisons(setup.pairs.map((pair) => ({ ...pair })));
-    const rehydrated = {};
-    Object.entries(setup.accountingRules ?? {}).forEach(([key, rule]) => {
-      rehydrated[key] = hydrateRule(rule);
-    });
-    setAccountingRules(rehydrated);
-    setResults(null);
-    setReconciliation(null);
   }, []);
 
   const handleReset = useCallback(() => {
@@ -232,10 +157,12 @@ export default function App() {
     setFileA(emptySlot);
     setFileB(emptySlot);
     setAccountingFile(emptySlot);
+    setKeyColA('');
+    setKeyColB('');
+    setKeyColAcct('');
     setComparisons([]);
     setAccountingRules({});
     setResults(null);
-    setReconciliation(null);
     setError('');
     setProgressA(0);
     setProgressB(0);
@@ -246,10 +173,78 @@ export default function App() {
     abortRef.current?.abort();
   }, []);
 
+  // ==========================================================================
+  // SETUP JSON EXPORT & IMPORT
+  // ==========================================================================
+  const handleExportJson = useCallback(() => {
+    const dehydratedRules = {};
+    Object.entries(accountingRules).forEach(([k, rule]) => {
+      dehydratedRules[k] = dehydrateRule(rule);
+    });
+
+    const setup = {
+      version: 2,
+      keyColA,
+      keyColB,
+      keyColAcct,
+      comparisons,
+      accountingRules: dehydratedRules,
+      exportedAt: new Date().toISOString()
+    };
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const jsonString = JSON.stringify(setup, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `reconciliation-setup-${stamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [keyColA, keyColB, keyColAcct, comparisons, accountingRules]);
+
+  const handleImportJsonFile = useCallback((event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (data.keyColA !== undefined) setKeyColA(data.keyColA || '');
+        if (data.keyColB !== undefined) setKeyColB(data.keyColB || '');
+        if (data.keyColAcct !== undefined) setKeyColAcct(data.keyColAcct || '');
+        if (Array.isArray(data.comparisons)) {
+          setComparisons(data.comparisons);
+        } else if (Array.isArray(data.pairs)) {
+          setComparisons(data.pairs);
+        }
+        if (data.accountingRules && typeof data.accountingRules === 'object') {
+          const rehydrated = {};
+          Object.entries(data.accountingRules).forEach(([k, rule]) => {
+            rehydrated[k] = hydrateRule(rule);
+          });
+          setAccountingRules(rehydrated);
+        }
+        setResults(null);
+        setError('');
+      } catch (err) {
+        setError('Invalid setup JSON file.');
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+  }, []);
+
+  // ==========================================================================
+  // HANDLERS — STEP 5: RUNNING CONCURRENT STREAMING IN PARALLEL
+  // ==========================================================================
   const handleRun = useCallback(async () => {
     if (!canRun) return;
+
     setResults(null);
-    setReconciliation(null);
     setError('');
     setProgressA(0);
     setProgressB(0);
@@ -260,107 +255,80 @@ export default function App() {
     abortRef.current = controller;
 
     try {
-      const resultA = await computeFileSums(fileA.file, columnsA, {
+      const sumColsA = new Set();
+      const sumColsB = new Set();
+      comparisons.forEach((p) => {
+        getPartsA(p).forEach((part) => sumColsA.add(part.col));
+        getPartsB(p).forEach((part) => sumColsB.add(part.col));
+      });
+
+      const activeSpecs = comparisons
+        .map((pair) => {
+          const rule = accountingRules[pairKey(pair)];
+          if (!isRuleActive(rule)) return null;
+          const spec = ruleToPairSpec(rule);
+          if (spec.parts.length === 0) return null;
+          return { key: pairKey(pair), ...spec };
+        })
+        .filter(Boolean);
+
+      const streamTaskA = streamGroupedSums(fileA.file, keyColA, Array.from(sumColsA), {
         signal: controller.signal,
         onProgress: (bytes) => {
           setProgressA(fileA.size ? (bytes / fileA.size) * 100 : 0);
         }
       });
-      const resultB = await computeFileSums(fileB.file, columnsB, {
+
+      const streamTaskB = streamGroupedSums(fileB.file, keyColB, Array.from(sumColsB), {
         signal: controller.signal,
         onProgress: (bytes) => {
           setProgressB(fileB.size ? (bytes / fileB.size) * 100 : 0);
         }
       });
 
+      const streamTaskAcct =
+        accountingFile.file && keyColAcct && activeSpecs.length > 0
+          ? streamGroupedFilteredSums(accountingFile.file, keyColAcct, activeSpecs, {
+              signal: controller.signal,
+              onProgress: (bytes) => {
+                setProgressAccounting(
+                  accountingFile.size ? (bytes / accountingFile.size) * 100 : 0
+                );
+              }
+            })
+          : Promise.resolve(null);
+
+      const [resA, resB, acctResult] = await Promise.all([
+        streamTaskA,
+        streamTaskB,
+        streamTaskAcct
+      ]);
+
       setProgressA(100);
       setProgressB(100);
-      const pairs = buildPairResults({ comparisons, resultA, resultB });
-      setResults({
-        rowCountA: resultA.rowCount,
-        rowCountB: resultB.rowCount,
-        pairs
+      if (acctResult) setProgressAccounting(100);
+
+      const loanRows = mergeLoanResults({
+        groupsA: resA.groups,
+        groupsB: resB.groups,
+        acctByPairByKey: acctResult ? acctResult.byPairByKey : null,
+        pairs: comparisons
       });
 
-      // Optional reconciliation pass if the user uploaded an accounting file
-      // AND at least one pair has an active rule configured.
-      const activeSpecs = pairs
-        .map((pair) => {
-          const rule = accountingRules[pairKey(pair)];
-          if (!isRuleActive(rule)) return null;
-          const spec = ruleToPairSpec(rule);
-          if (spec.parts.length === 0) return null;
-          return { key: pairKey(pair), pair, rule, ...spec };
-        })
-        .filter(Boolean);
+      const warnings = [
+        ...resA.missingColumns.map((c) => `File A: missing column "${c}"`),
+        ...resB.missingColumns.map((c) => `File B: missing column "${c}"`),
+        ...(acctResult ? acctResult.missingColumns.map((c) => `Accounting: missing column "${c}"`) : [])
+      ];
 
-      if (accountingFile.file && activeSpecs.length > 0) {
-        const streamResult = await computeFilteredSums(
-          accountingFile.file,
-          activeSpecs.map((entry) => ({ key: entry.key, parts: entry.parts })),
-          {
-            signal: controller.signal,
-            onProgress: (bytes) => {
-              setProgressAccounting(
-                accountingFile.size ? (bytes / accountingFile.size) * 100 : 0
-              );
-            }
-          }
-        );
-        setProgressAccounting(100);
-
-        const configuredKeys = new Set(activeSpecs.map((entry) => entry.key));
-        const reconRows = pairs.map((pair) => {
-          const key = pairKey(pair);
-          const rule = accountingRules[key];
-          if (!configuredKeys.has(key)) {
-            return {
-              colA: pair.colA,
-              colB: pair.colB,
-              diff: pair.diff,
-              expression: rule ? formatRulePreview(rule) : '',
-              accountingSum: null,
-              matchedRows: 0,
-              delta: null,
-              status: 'unmapped',
-              note: rule && isRuleActive(rule)
-                ? ''
-                : 'No accounting rule configured for this pair.'
-            };
-          }
-          const info = streamResult.byPair[key];
-          const sum = info.totalSum;
-          const delta = pair.diff - sum;
-          let status = Math.abs(delta) < MATCH_EPSILON ? 'match' : 'mismatch';
-          let note = '';
-          if (info.missingColumns.length > 0) {
-            status = 'error';
-            const unique = Array.from(new Set(info.missingColumns));
-            note = `Missing column${unique.length === 1 ? '' : 's'} in accounting file: ${unique.join(', ')}`;
-          }
-          return {
-            colA: pair.colA,
-            colB: pair.colB,
-            diff: pair.diff,
-            expression: formatRulePreview(rule),
-            accountingSum: sum,
-            matchedRows: info.matchedRows,
-            nonNumericSkipped: info.nonNumericSkipped,
-            delta,
-            status,
-            note
-          };
-        });
-
-        setReconciliation({
-          fileName: accountingFile.name,
-          rowCount: streamResult.rowCount,
-          rows: reconRows
-        });
-      }
-    } catch (runError) {
-      if (runError?.name !== 'AbortError') {
-        setError(runError.message || 'Something went wrong while streaming the files.');
+      setResults({
+        loanRows,
+        hasAccounting: Boolean(acctResult),
+        warnings
+      });
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        setError(err.message || 'Something went wrong while streaming the files.');
       }
     } finally {
       setRunning(false);
@@ -370,113 +338,132 @@ export default function App() {
     accountingFile,
     accountingRules,
     canRun,
-    columnsA,
-    columnsB,
     comparisons,
     fileA,
-    fileB
+    fileB,
+    keyColA,
+    keyColAcct,
+    keyColB
   ]);
 
-  const handleDownload = useCallback(() => {
+  const handleDownloadCsv = useCallback(() => {
     if (!results) return;
-    const csv = buildSummaryCsv({
-      metadata: {
-        generatedAt: new Date(),
-        fileA: { name: fileA.name, rows: results.rowCountA },
-        fileB: { name: fileB.name, rows: results.rowCountB },
-        accounting: reconciliation
-          ? { name: reconciliation.fileName, rowsScanned: reconciliation.rowCount }
-          : undefined
-      },
-      results: results.pairs,
-      reconciliation: reconciliation
-        ? { rowCount: reconciliation.rowCount, rows: reconciliation.rows }
-        : null
-    });
+    const csv = buildLoanCsv(results.loanRows, comparisons, results.hasAccounting);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    downloadCsv(`accounts-comparison-summary-${stamp}.csv`, csv);
-  }, [fileA.name, fileB.name, reconciliation, results]);
+    downloadCsv(`reconciliation-by-key-${stamp}.csv`, csv);
+  }, [comparisons, results]);
 
   return (
-    <div className="min-h-full bg-base-200 text-base-content">
+    <div className="min-h-screen bg-base-200 text-base-content pb-20">
       <Header theme={theme} onToggleTheme={toggle} />
 
-      <main className="max-w-6xl mx-auto p-4 sm:p-6 flex flex-col gap-4">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 flex flex-col gap-6">
         {error ? (
-          <div role="alert" className="alert alert-error">
+          <div role="alert" className="alert alert-error shadow-lg rounded-2xl">
+            <AlertCircle className="w-5 h-5 shrink-0" />
             <span>{error}</span>
           </div>
         ) : null}
 
+        {/* Global Action Bar: Save / Load Settings JSON */}
+        <div className="flex items-center justify-between flex-wrap gap-4 bg-base-100 p-4 rounded-2xl border border-base-content/10 shadow-md">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center">
+              <FileJson className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-sm font-bold font-display text-base-content">
+                Configuration Presets
+              </div>
+              <div className="text-xs text-base-content/60">
+                Save or load Key Columns, Comparison Pairs, and Accounting Rules as a JSON file
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="file"
+              accept=".json"
+              ref={fileInputRef}
+              onChange={handleImportJsonFile}
+              className="hidden"
+            />
+            <button
+              type="button"
+              className="btn btn-sm btn-outline gap-1.5 rounded-xl border-base-content/20 hover:border-primary"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Upload className="w-3.5 h-3.5" /> Load Setup JSON
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline gap-1.5 rounded-xl border-base-content/20 hover:border-primary"
+              onClick={handleExportJson}
+              disabled={comparisons.length === 0 && !keyColA && !keyColB}
+            >
+              <Download className="w-3.5 h-3.5" /> Save Setup JSON
+            </button>
+          </div>
+        </div>
+
+        {/* Step 1: Upload Files */}
         <Collapsible
-          title="1. Upload CSV files"
-          subtitle="Only headers are read on upload; the full files are streamed later."
+          title="1. Upload CSV Files"
+          subtitle="File A, File B, and optional Accounting CSV. Large files are streamed in parallel."
           defaultOpen
+          badge={<span className="badge badge-primary badge-sm font-mono text-[10px]">Step 1</span>}
         >
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-5 md:grid-cols-3">
             <FileUpload
-              label="File A"
+              label="File A (Sales / Loan Book)"
               file={fileA}
               loading={peekingA}
-              onChange={(event) => handleFileChange('fileA', event)}
+              onChange={(e) => handleFileChange('fileA', e)}
             />
             <FileUpload
-              label="File B"
+              label="File B (Core Banking / System)"
               file={fileB}
               loading={peekingB}
-              onChange={(event) => handleFileChange('fileB', event)}
+              onChange={(e) => handleFileChange('fileB', e)}
             />
             <FileUpload
-              label="Accounting file (optional)"
+              label="Accounting File (Optional Ledger)"
               file={accountingFile}
               loading={peekingAccounting}
-              onChange={(event) => handleFileChange('accounting', event)}
+              onChange={(e) => handleFileChange('accounting', e)}
             />
           </div>
-          <p className="text-xs text-base-content/60">
-            Provide the accounting CSV now to configure reconciliation rules alongside your
-            pairs, then run everything in one shot.
-          </p>
         </Collapsible>
 
-        <Collapsible
-          title="Saved setups (local settings)"
-          subtitle={
-            setups.length > 0
-              ? `${setups.length} configuration${setups.length === 1 ? '' : 's'} in your browser. Includes pairs and reconciliation rules.`
-              : 'Import a JSON, load samples, or save a configuration below.'
-          }
-          defaultOpen={setups.length === 0}
-        >
-          <SavedSetupsPanel
-            setups={setups}
-            headersA={fileA.headers}
-            headersB={fileB.headers}
-            onApply={handleApplySetup}
-            onRename={renameSetup}
-            onRemove={removeSetup}
-            onClearAll={clearAll}
-            onLoadDefaults={loadDefaults}
-            onImport={importSetups}
-            onSaveCurrent={handleSaveSetup}
-            currentPairsCount={comparisons.length}
-            currentActiveRulesCount={activeRuleCount}
-            currentRulePartsCount={activeRulePartsCount}
-            exportSetupJson={exportSetupJson}
-            exportAllJson={exportAllJson}
-            disabled={running}
-          />
-        </Collapsible>
-
+        {/* Step 2: Select Key Columns */}
         {bothFilesReady ? (
           <Collapsible
-            title="2. Configure column pairs"
-            subtitle={
-              comparisons.length > 0
-                ? `${comparisons.length} pair${comparisons.length === 1 ? '' : 's'} selected.`
-                : 'Pick which numeric columns get summed and compared between File A and File B.'
-            }
+            title="2. Select Key Column (Search & Match by Loan ID)"
+            subtitle="Pick the unique identifier column in each file to match records per loan."
             defaultOpen
+            badge={<span className="badge badge-primary badge-sm font-mono text-[10px]">Step 2</span>}
+          >
+            <KeyColumnPicker
+              headersA={fileA.headers}
+              headersB={fileB.headers}
+              headersAccounting={accountingFile.headers}
+              keyColA={keyColA}
+              keyColB={keyColB}
+              keyColAcct={keyColAcct}
+              onChange={handleKeyChange}
+              disabled={running}
+            />
+          </Collapsible>
+        ) : null}
+
+        {/* Step 3: Select Column Pairs */}
+        {bothFilesReady ? (
+          <Collapsible
+            title="3. Select Column Pairs to Compare"
+            subtitle="Choose simple 1-to-1 pairs OR composite multi-column formulas (+/−) between File A and File B."
+            defaultOpen
+            badge={<span className="badge badge-primary badge-sm font-mono text-[10px]">Step 3</span>}
           >
             <PairBuilder
               headersA={fileA.headers}
@@ -484,208 +471,130 @@ export default function App() {
               commonColumns={commonColumns}
               comparisons={comparisons}
               onAddPair={handleAddPair}
-              onAddPairs={handleAddPairs}
-              onRemoveComparison={handleRemovePair}
+              onRemovePair={handleRemovePair}
               onClearAll={handleClearPairs}
-              onSave={handleSaveSetup}
-              canSave={comparisons.length > 0}
-            />
-          </Collapsible>
-        ) : null}
-
-        {bothFilesReady && comparisons.length > 0 ? (
-          <Collapsible
-            title="3. Accounting reconciliation rules"
-            subtitle={
-              hasAccounting
-                ? `${activeRuleCount} of ${comparisons.length} pair${comparisons.length === 1 ? '' : 's'} have a rule. Rules are streamed together with the comparison.`
-                : 'Optional. Upload the accounting file in step 1 to enable column pickers.'
-            }
-            defaultOpen={hasAccounting}
-            actions={
-              <button
-                type="button"
-                className="btn btn-xs btn-outline"
-                onClick={() => handleSaveSetup('')}
-                disabled={running || comparisons.length === 0}
-                title="Save current pairs and rules to local settings (open Saved setups to rename)"
-              >
-                Save setup
-              </button>
-            }
-          >
-            <AccountingReconcileConfig
-              pairs={comparisons.map((pair) => ({ ...pair }))}
-              accountingHeaders={accountingFile.headers}
-              rules={accountingRules}
-              onRulesChange={handleRulesChange}
               disabled={running}
             />
           </Collapsible>
         ) : null}
 
+        {/* Step 4: Accounting Rules & Filters */}
         {bothFilesReady && comparisons.length > 0 ? (
-          <section className="card bg-base-100 border border-base-300 shadow-sm">
-            <div className="card-body gap-4">
-              <div className="flex items-center justify-between flex-wrap gap-2">
+          <Collapsible
+            title="4. Accounting Rules & Filters (Optional)"
+            subtitle="Configure Accounting columns to Add (+) or Subtract (−) along with filter conditions per pair."
+            defaultOpen={Boolean(accountingFile.file)}
+            badge={<span className="badge badge-primary badge-sm font-mono text-[10px]">Step 4</span>}
+          >
+            <RuleEditor
+              pairs={comparisons}
+              accountingHeaders={accountingFile.headers}
+              rules={accountingRules}
+              onRulesChange={setAccountingRules}
+              disabled={running}
+            />
+          </Collapsible>
+        ) : null}
+
+        {/* Step 5: Run Execution */}
+        {bothFilesReady && comparisons.length > 0 ? (
+          <section className="rounded-2xl bg-base-100 border border-base-content/10 shadow-xl overflow-hidden">
+            <div className="p-6 flex flex-col gap-5">
+              <div className="flex items-center justify-between flex-wrap gap-4">
                 <div>
-                  <h2 className="card-title text-base">4. Run</h2>
-                  <p className="text-sm text-base-content/60">
-                    {hasAccounting && activeRuleCount > 0
-                      ? 'Streams all three files: computes the diff and the accounting reconciliation in one pass.'
-                      : 'Streams File A and File B and computes the diff for each pair.'}
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-bold font-display text-base-content">
+                      5. Run Reconciliation
+                    </h2>
+                    <span className="badge badge-primary badge-sm font-mono text-[10px]">
+                      Step 5
+                    </span>
+                  </div>
+                  <p className="text-xs sm:text-sm text-base-content/60 mt-0.5">
+                    Streams all files concurrently in parallel grouped by Loan Key and verifies if <code className="font-mono">Diff</code> matches the Accounting rules per loan.
                   </p>
                 </div>
-                <div className="flex gap-2">
+
+                <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    className="btn btn-ghost"
+                    className="btn btn-ghost btn-sm gap-1.5"
                     onClick={handleReset}
                     disabled={running}
                   >
-                    Reset
+                    <RotateCcw className="w-3.5 h-3.5" /> Reset All
                   </button>
                   {running ? (
                     <button
                       type="button"
-                      className="btn btn-error btn-outline"
+                      className="btn btn-error btn-sm gap-1.5"
                       onClick={handleCancel}
                     >
-                      Cancel
+                      <X className="w-4 h-4" /> Cancel Streaming
                     </button>
                   ) : (
                     <button
                       type="button"
-                      className="btn btn-primary"
+                      className="btn btn-primary btn-sm sm:btn-md gap-2 shadow-lg shadow-primary/25 font-bold px-6"
                       onClick={handleRun}
                       disabled={!canRun}
                     >
-                      Compare {hasAccounting && activeRuleCount > 0 ? '& reconcile' : ''}
+                      <Play className="w-4 h-4 fill-current" /> Compare & Reconcile by Key
                     </button>
                   )}
                 </div>
               </div>
 
-              {running || progressA > 0 || progressB > 0 || progressAccounting > 0 ? (
-                <div className="flex flex-col gap-3">
+              {(running || progressA > 0 || progressB > 0 || progressAccounting > 0) && (
+                <div className="flex flex-col gap-3 pt-2 border-t border-base-content/5">
                   <ProgressBar
-                    label={`File A · ${fileA.name}`}
+                    label={`File A (${fileA.name})`}
                     percent={progressA}
-                    subtitle={running ? 'Streaming rows, memory stays constant.' : null}
+                    subtitle={running ? 'Parallel O(1) streaming & grouping…' : null}
                   />
                   <ProgressBar
-                    label={`File B · ${fileB.name}`}
+                    label={`File B (${fileB.name})`}
                     percent={progressB}
-                    subtitle={running ? 'Only running sums are kept in memory.' : null}
+                    subtitle={running ? 'Parallel O(1) streaming & grouping…' : null}
                   />
-                  {hasAccounting && activeRuleCount > 0 ? (
+                  {accountingFile.file && keyColAcct && (
                     <ProgressBar
-                      label={`Accounting · ${accountingFile.name}`}
+                      label={`Accounting (${accountingFile.name})`}
                       percent={progressAccounting}
-                      subtitle={running ? 'Streaming the accounting file once for all rules.' : null}
+                      subtitle={running ? 'Parallel O(1) streaming & rule filtering…' : null}
                     />
-                  ) : null}
+                  )}
                 </div>
-              ) : null}
+              )}
             </div>
           </section>
         ) : null}
 
-        {results ? (
-          <>
-            <ResultsSummary
-              rowCountA={results.rowCountA}
-              rowCountB={results.rowCountB}
-              pairs={results.pairs}
-            />
-            {reconciliation ? <ReconciliationResults data={reconciliation} /> : null}
-            <div className="flex flex-wrap justify-end gap-2">
-              <button type="button" className="btn btn-primary" onClick={handleDownload}>
-                Download summary CSV
-              </button>
+        {/* Warnings Alert */}
+        {results?.warnings?.length > 0 ? (
+          <div role="alert" className="alert alert-warning shadow-lg rounded-2xl">
+            <AlertCircle className="w-5 h-5 shrink-0" />
+            <div>
+              <div className="font-bold text-sm">Columns Note</div>
+              <ul className="text-xs list-disc pl-4 mt-1">
+                {results.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
             </div>
-          </>
+          </div>
+        ) : null}
+
+        {/* Results Table */}
+        {results ? (
+          <LoanResults
+            loanRows={results.loanRows}
+            pairs={comparisons}
+            hasAccounting={results.hasAccounting}
+            onDownload={handleDownloadCsv}
+          />
         ) : null}
       </main>
     </div>
-  );
-}
-
-function ReconciliationResults({ data }) {
-  return (
-    <section className="card bg-base-100 border border-base-300 shadow-sm">
-      <div className="card-body gap-3">
-        <div>
-          <h2 className="card-title text-base">Reconciliation</h2>
-          <p className="text-sm text-base-content/60">
-            {data.fileName} · {data.rowCount.toLocaleString()} rows scanned.
-          </p>
-        </div>
-        <div className="overflow-x-auto rounded-xl border border-base-300">
-          <table className="table table-sm">
-            <thead className="bg-base-200/60">
-              <tr>
-                <th>Pair</th>
-                <th>Rule</th>
-                <th className="text-right">Diff (A − B)</th>
-                <th className="text-right">Σ accounting</th>
-                <th className="text-right">Matched rows</th>
-                <th className="text-right">Δ (diff − sum)</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.rows.map((row) => (
-                <tr key={`${row.colA}::${row.colB}`} className="hover align-top">
-                  <td>
-                    <div className="font-medium">{row.colA}</div>
-                    <div className="text-xs text-base-content/60">↔ {row.colB}</div>
-                  </td>
-                  <td className="text-xs">
-                    {row.expression ? (
-                      <div className="font-mono whitespace-pre-wrap break-words">
-                        {row.expression}
-                      </div>
-                    ) : (
-                      <span className="text-base-content/50">— not configured —</span>
-                    )}
-                    {row.note ? (
-                      <div className="text-warning text-[11px] mt-1">{row.note}</div>
-                    ) : null}
-                  </td>
-                  <td className="text-right tabular-nums whitespace-nowrap">
-                    {formatNumber(row.diff)}
-                  </td>
-                  <td className="text-right tabular-nums whitespace-nowrap">
-                    {row.accountingSum === null ? '—' : formatNumber(row.accountingSum)}
-                  </td>
-                  <td className="text-right tabular-nums whitespace-nowrap">
-                    {row.accountingSum === null ? '—' : row.matchedRows.toLocaleString()}
-                  </td>
-                  <td className="text-right tabular-nums whitespace-nowrap">
-                    {row.delta === null ? '—' : formatNumber(row.delta)}
-                  </td>
-                  <td>
-                    {row.status === 'match' ? (
-                      <span className="badge badge-success badge-outline gap-1">
-                        <span aria-hidden="true">✓</span> Matches
-                      </span>
-                    ) : row.status === 'mismatch' ? (
-                      <span className="badge badge-error badge-outline gap-1">
-                        <span aria-hidden="true">✗</span> Off by {formatNumber(row.delta)}
-                      </span>
-                    ) : row.status === 'error' ? (
-                      <span className="badge badge-warning badge-outline">Rule error</span>
-                    ) : (
-                      <span className="badge badge-ghost badge-outline">Skipped</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
   );
 }

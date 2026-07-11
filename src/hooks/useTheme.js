@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { readJson, writeJson } from '../lib/storage';
 
 const STORAGE_KEY = 'accounts-compare:theme';
 
 function getInitialTheme() {
-  const stored = readJson(STORAGE_KEY, null);
-  if (stored === 'light' || stored === 'dark') return stored;
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === 'light' || stored === 'dark') return stored;
+  } catch {
+    // ignore
+  }
   if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
     return 'dark';
   }
@@ -17,7 +20,11 @@ export function useTheme() {
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    writeJson(STORAGE_KEY, theme);
+    try {
+      localStorage.setItem(STORAGE_KEY, theme);
+    } catch {
+      // ignore
+    }
   }, [theme]);
 
   const toggle = useCallback(() => {

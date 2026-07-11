@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { SearchableSelect } from './SearchableSelect';
-import { MultiSelect } from './MultiSelect';
+import { formatSideLabel, getPartsA, getPartsB } from '../lib/engine';
+import { GitCompare, PlusCircle, Trash2, ArrowLeftRight, Layers } from 'lucide-react';
 
 export function PairBuilder({
   headersA,
@@ -8,289 +9,338 @@ export function PairBuilder({
   commonColumns,
   comparisons,
   onAddPair,
-  onAddPairs,
-  onRemoveComparison,
+  onRemovePair,
   onClearAll,
-  onSave,
-  canSave
+  disabled
 }) {
-  const [pendingColA, setPendingColA] = useState('');
-  const [pendingColB, setPendingColB] = useState('');
-  const [bulkSelection, setBulkSelection] = useState([]);
-  const [matchedCollapsed, setMatchedCollapsed] = useState(false);
-  const [savePromptOpen, setSavePromptOpen] = useState(false);
-  const [saveLabel, setSaveLabel] = useState('');
+  const [colA, setColA] = useState('');
+  const [colB, setColB] = useState('');
 
-  const canAdd = Boolean(pendingColA && pendingColB);
+  const [mode, setMode] = useState('simple'); // 'simple' | 'composite'
+  const [compositePartsA, setCompositePartsA] = useState([{ col: '', sign: 1 }]);
+  const [compositePartsB, setCompositePartsB] = useState([{ col: '', sign: 1 }]);
 
-  const selectedMatchedSet = new Set(
-    comparisons.filter((pair) => pair.colA === pair.colB).map((pair) => pair.colA)
-  );
-
-  function handleAddPair() {
-    if (!canAdd) return;
-    onAddPair({ colA: pendingColA, colB: pendingColB });
-    setPendingColA('');
-    setPendingColB('');
+  function handleAddSimple() {
+    if (!colA || !colB) return;
+    onAddPair({ colA, colB, partsA: [{ col: colA, sign: 1 }], partsB: [{ col: colB, sign: 1 }] });
+    setColA('');
+    setColB('');
   }
 
-  function handleBulkAdd() {
-    if (bulkSelection.length === 0) return;
-    onAddPairs(bulkSelection.map((name) => ({ colA: name, colB: name })));
-    setBulkSelection([]);
+  function handleAddCommon(colName) {
+    onAddPair({
+      colA: colName,
+      colB: colName,
+      partsA: [{ col: colName, sign: 1 }],
+      partsB: [{ col: colName, sign: 1 }]
+    });
   }
 
-  function handleQuickAddMatched(name) {
-    if (selectedMatchedSet.has(name)) return;
-    onAddPair({ colA: name, colB: name });
+  function handleAddComposite() {
+    const validPartsA = compositePartsA.filter((p) => p.col);
+    const validPartsB = compositePartsB.filter((p) => p.col);
+    if (validPartsA.length === 0 || validPartsB.length === 0) return;
+
+    const mainColA = validPartsA[0].col;
+    const mainColB = validPartsB[0].col;
+
+    onAddPair({
+      colA: mainColA,
+      colB: mainColB,
+      partsA: validPartsA,
+      partsB: validPartsB
+    });
+
+    setCompositePartsA([{ col: '', sign: 1 }]);
+    setCompositePartsB([{ col: '', sign: 1 }]);
   }
 
-  function handleAddAllMatched() {
-    const remaining = commonColumns.filter((name) => !selectedMatchedSet.has(name));
-    if (remaining.length === 0) return;
-    onAddPairs(remaining.map((name) => ({ colA: name, colB: name })));
-  }
-
-  function handleOpenSavePrompt() {
-    setSaveLabel('');
-    setSavePromptOpen(true);
-  }
-
-  function handleConfirmSave() {
-    onSave(saveLabel.trim());
-    setSaveLabel('');
-    setSavePromptOpen(false);
-  }
-
-  function handleCancelSave() {
-    setSaveLabel('');
-    setSavePromptOpen(false);
-  }
+  const existingPairsSet = new Set(comparisons.map((p) => `${p.colA}::${p.colB}`));
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <p className="text-sm text-base-content/60">
-          Only the columns you pick are streamed and summed.
-        </p>
-        <div className="flex gap-2">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-2 text-xs sm:text-sm text-base-content/70">
+          <GitCompare className="w-4 h-4 text-primary shrink-0" />
+          <span>
+            Choose columns to sum and compare between File A and File B.
+          </span>
+        </div>
+        <div className="join bg-base-200 p-1 rounded-xl border border-base-content/10">
           <button
             type="button"
-            className="btn btn-sm btn-ghost"
-            onClick={onClearAll}
-            disabled={comparisons.length === 0}
+            className={`btn btn-xs join-item rounded-lg gap-1.5 ${
+              mode === 'simple' ? 'btn-primary shadow-sm' : 'btn-ghost'
+            }`}
+            onClick={() => setMode('simple')}
           >
-            Clear pairs
+            <ArrowLeftRight className="w-3.5 h-3.5" /> 1-to-1 Pair
           </button>
           <button
             type="button"
-            className="btn btn-sm btn-outline"
-            onClick={handleOpenSavePrompt}
-            disabled={!canSave || savePromptOpen}
-            title="Store these pairs and their accounting rules in your browser"
+            className={`btn btn-xs join-item rounded-lg gap-1.5 ${
+              mode === 'composite' ? 'btn-primary shadow-sm' : 'btn-ghost'
+            }`}
+            onClick={() => setMode('composite')}
           >
-            Save setup (pairs + rules)
+            <Layers className="w-3.5 h-3.5" /> Composite Formula (+/−)
           </button>
         </div>
       </div>
 
-        {savePromptOpen ? (
-          <div className="rounded-xl border border-primary/40 bg-primary/5 p-4">
-            <div className="text-sm font-semibold mb-2">Save current pairs</div>
-            <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-center">
-              <input
-                type="text"
-                className="input input-bordered w-full min-h-12"
-                placeholder="Give this setup a name (optional)…"
-                value={saveLabel}
-                onChange={(event) => setSaveLabel(event.target.value)}
-                autoFocus
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') handleConfirmSave();
-                  if (event.key === 'Escape') handleCancelSave();
-                }}
-              />
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={handleConfirmSave}
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={handleCancelSave}
-              >
-                Cancel
-              </button>
-            </div>
-            <p className="text-xs text-base-content/60 mt-2">
-              Saved to your browser only. Nothing is sent anywhere. Leave the name empty to auto-generate one.
-            </p>
-          </div>
-        ) : null}
-
-        {commonColumns.length > 0 ? (
-          <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
-            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
-              <div>
-                <div className="text-sm font-semibold">
-                  Quick add · columns present in both files
-                </div>
-                <div className="text-xs text-base-content/60">
-                  {commonColumns.length} column
-                  {commonColumns.length === 1 ? '' : 's'} match by name.
-                </div>
-              </div>
-            </div>
-            <MultiSelect
-              values={bulkSelection}
-              options={commonColumns}
-              onChange={setBulkSelection}
-              placeholder="Search columns present in both files…"
-              actionLabel={`Add ${bulkSelection.length || ''} as pairs`.trim()}
-              onAction={handleBulkAdd}
-              hint="Each selection becomes a pair like column ↔ same column in File B."
-            />
-          </div>
-        ) : null}
-
-        <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
-          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-            <button
-              type="button"
-              className="flex items-center gap-2 text-left min-w-0"
-              onClick={() => setMatchedCollapsed((current) => !current)}
-              aria-expanded={!matchedCollapsed}
-            >
-              <span
-                aria-hidden="true"
-                className={[
-                  'inline-block transition-transform text-base-content/60',
-                  matchedCollapsed ? '' : 'rotate-90'
-                ].join(' ')}
-              >
-                ▶
+      {mode === 'simple' ? (
+        <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end bg-base-200/50 p-4 rounded-2xl border border-base-content/10 shadow-sm">
+          <div className="form-control w-full">
+            <label className="label py-1">
+              <span className="label-text text-xs font-bold uppercase tracking-wider text-primary">
+                File A Numeric Column
               </span>
-              <span className="min-w-0">
-                <span className="block text-sm font-semibold">Matched columns</span>
-                <span className="block text-xs text-base-content/60">
-                  {commonColumns.length > 0
-                    ? `${commonColumns.length} column${commonColumns.length === 1 ? '' : 's'} share the same name in both files. Click to add as a pair.`
-                    : 'No columns share the same name across the two files.'}
-                </span>
-              </span>
-            </button>
-            <div className="flex items-center gap-2">
-              {commonColumns.length > 0 ? (
-                <button
-                  type="button"
-                  className="btn btn-xs btn-outline"
-                  onClick={handleAddAllMatched}
-                  disabled={commonColumns.every((name) => selectedMatchedSet.has(name))}
-                >
-                  Add all
-                </button>
-              ) : null}
-              {commonColumns.length > 0 ? (
-                <button
-                  type="button"
-                  className="btn btn-xs btn-ghost"
-                  onClick={() => setMatchedCollapsed((current) => !current)}
-                >
-                  {matchedCollapsed ? 'Show' : 'Hide'}
-                </button>
-              ) : null}
-            </div>
-          </div>
-          {!matchedCollapsed && commonColumns.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {commonColumns.map((name) => {
-                const isSelected = selectedMatchedSet.has(name);
-                return (
-                  <button
-                    key={name}
-                    type="button"
-                    onClick={() => handleQuickAddMatched(name)}
-                    disabled={isSelected}
-                    className={[
-                      'badge badge-lg gap-1 py-3 cursor-pointer transition',
-                      isSelected
-                        ? 'badge-primary badge-outline cursor-default opacity-70'
-                        : 'badge-outline hover:badge-primary'
-                    ].join(' ')}
-                    title={isSelected ? `${name} is already added` : `Add ${name} as a pair`}
-                  >
-                    {isSelected ? <span aria-hidden="true">✓</span> : <span aria-hidden="true">+</span>}
-                    <span className="font-medium">{name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="rounded-xl border border-base-300 bg-base-200/40 p-4">
-          <div className="text-sm font-semibold mb-3">Custom pair</div>
-          <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+            </label>
             <SearchableSelect
-              label="Column in File A"
-              value={pendingColA}
+              value={colA}
               options={headersA}
-              onChange={setPendingColA}
+              onChange={setColA}
+              placeholder="Search File A numeric column…"
+              disabled={disabled}
             />
-            <SearchableSelect
-              label="Column in File B"
-              value={pendingColB}
-              options={headersB}
-              onChange={setPendingColB}
-            />
-            <button
-              type="button"
-              className="btn btn-primary h-12 min-h-12"
-              onClick={handleAddPair}
-              disabled={!canAdd}
-            >
-              Add pair
-            </button>
           </div>
-          <p className="text-xs text-base-content/60 mt-2">
-            Use this when the column names differ between File A and File B.
-          </p>
-        </div>
 
-        <div>
-          <div className="text-sm font-semibold mb-2">
-            Selected pairs ({comparisons.length})
+          <div className="form-control w-full">
+            <label className="label py-1">
+              <span className="label-text text-xs font-bold uppercase tracking-wider text-secondary">
+                File B Numeric Column
+              </span>
+            </label>
+            <SearchableSelect
+              value={colB}
+              options={headersB}
+              onChange={setColB}
+              placeholder="Search File B numeric column…"
+              disabled={disabled}
+            />
           </div>
-          {comparisons.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {comparisons.map((pair, index) => (
-                <div
-                  key={`${pair.colA}::${pair.colB}::${index}`}
-                  className="badge badge-lg badge-outline gap-2 py-3"
-                >
-                  <span className="font-medium">{pair.colA}</span>
-                  <span className="opacity-60">−</span>
-                  <span className="font-medium">{pair.colB}</span>
+
+          <button
+            type="button"
+            className="btn btn-primary min-w-[130px] gap-2 shadow-md shadow-primary/20"
+            onClick={handleAddSimple}
+            disabled={!colA || !colB || disabled}
+          >
+            <PlusCircle className="w-4 h-4" /> Add Pair
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-4 bg-base-200/50 p-5 rounded-2xl border border-base-content/10 shadow-sm">
+          <div className="grid gap-6 md:grid-cols-2">
+            {/* Side A formula */}
+            <div className="flex flex-col gap-3 p-4 rounded-xl bg-base-100 border border-primary/20">
+              <div className="text-xs font-bold uppercase tracking-wider text-primary flex items-center gap-1.5">
+                File A Formula (+/− Columns)
+              </div>
+              {compositePartsA.map((part, idx) => (
+                <div key={idx} className="grid grid-cols-[85px_minmax(0,1fr)_auto] gap-2 items-center">
+                  <select
+                    className="select select-bordered select-sm"
+                    value={part.sign === -1 ? '-1' : '1'}
+                    onChange={(e) => {
+                      const sign = e.target.value === '-1' ? -1 : 1;
+                      setCompositePartsA((curr) =>
+                        curr.map((p, i) => (i === idx ? { ...p, sign } : p))
+                      );
+                    }}
+                  >
+                    <option value="1">+ Add</option>
+                    <option value="-1">− Sub</option>
+                  </select>
+                  <SearchableSelect
+                    value={part.col}
+                    options={headersA}
+                    onChange={(val) =>
+                      setCompositePartsA((curr) =>
+                        curr.map((p, i) => (i === idx ? { ...p, col: val } : p))
+                      )
+                    }
+                    placeholder="Search File A column…"
+                  />
                   <button
                     type="button"
-                    className="btn btn-ghost btn-xs btn-circle"
-                    onClick={() => onRemoveComparison(index)}
-                    aria-label={`Remove ${pair.colA} vs ${pair.colB}`}
+                    className="btn btn-ghost btn-xs text-base-content/60 hover:text-error"
+                    onClick={() =>
+                      setCompositePartsA((curr) =>
+                        curr.length <= 1 ? [{ col: '', sign: 1 }] : curr.filter((_, i) => i !== idx)
+                      )
+                    }
                   >
                     ✕
                   </button>
                 </div>
               ))}
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline btn-primary"
+                  onClick={() => setCompositePartsA((curr) => [...curr, { col: '', sign: 1 }])}
+                >
+                  + Add (+) Column
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline btn-error"
+                  onClick={() => setCompositePartsA((curr) => [...curr, { col: '', sign: -1 }])}
+                >
+                  − Add (−) Column
+                </button>
+              </div>
             </div>
-          ) : (
-            <p className="text-sm text-base-content/60">
-              No pairs yet. Use quick add or the custom pair form above.
-            </p>
-          )}
+
+            {/* Side B formula */}
+            <div className="flex flex-col gap-3 p-4 rounded-xl bg-base-100 border border-secondary/20">
+              <div className="text-xs font-bold uppercase tracking-wider text-secondary flex items-center gap-1.5">
+                File B Formula (+/− Columns)
+              </div>
+              {compositePartsB.map((part, idx) => (
+                <div key={idx} className="grid grid-cols-[85px_minmax(0,1fr)_auto] gap-2 items-center">
+                  <select
+                    className="select select-bordered select-sm"
+                    value={part.sign === -1 ? '-1' : '1'}
+                    onChange={(e) => {
+                      const sign = e.target.value === '-1' ? -1 : 1;
+                      setCompositePartsB((curr) =>
+                        curr.map((p, i) => (i === idx ? { ...p, sign } : p))
+                      );
+                    }}
+                  >
+                    <option value="1">+ Add</option>
+                    <option value="-1">− Sub</option>
+                  </select>
+                  <SearchableSelect
+                    value={part.col}
+                    options={headersB}
+                    onChange={(val) =>
+                      setCompositePartsB((curr) =>
+                        curr.map((p, i) => (i === idx ? { ...p, col: val } : p))
+                      )
+                    }
+                    placeholder="Search File B column…"
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-xs text-base-content/60 hover:text-error"
+                    onClick={() =>
+                      setCompositePartsB((curr) =>
+                        curr.length <= 1 ? [{ col: '', sign: 1 }] : curr.filter((_, i) => i !== idx)
+                      )
+                    }
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline btn-secondary"
+                  onClick={() => setCompositePartsB((curr) => [...curr, { col: '', sign: 1 }])}
+                >
+                  + Add (+) Column
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline btn-error"
+                  onClick={() => setCompositePartsB((curr) => [...curr, { col: '', sign: -1 }])}
+                >
+                  − Add (−) Column
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <button
+              type="button"
+              className="btn btn-primary gap-2 shadow-md shadow-primary/20"
+              onClick={handleAddComposite}
+              disabled={disabled}
+            >
+              <PlusCircle className="w-4 h-4" /> Add Composite Formula Pair
+            </button>
+          </div>
         </div>
+      )}
+
+      {/* Common Columns Quick Add */}
+      {commonColumns.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <div className="text-xs font-bold uppercase tracking-wider text-base-content/60">
+            Quick Add Matching Columns
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {commonColumns.map((col) => {
+              const alreadyAdded = existingPairsSet.has(`${col}::${col}`);
+              return (
+                <button
+                  key={col}
+                  type="button"
+                  className={`btn btn-xs rounded-full px-3 transition-all ${
+                    alreadyAdded
+                      ? 'btn-disabled opacity-40'
+                      : 'btn-outline border-base-content/20 hover:border-primary hover:text-primary'
+                  }`}
+                  onClick={() => handleAddCommon(col)}
+                  disabled={alreadyAdded || disabled}
+                >
+                  + {col}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Selected Pairs List */}
+      {comparisons.length > 0 ? (
+        <div className="flex flex-col gap-3 pt-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider text-base-content/70">
+              Selected Comparison Pairs ({comparisons.length})
+            </span>
+            <button
+              type="button"
+              className="btn btn-xs btn-ghost text-error gap-1 hover:bg-error/10"
+              onClick={onClearAll}
+              disabled={disabled}
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Clear All
+            </button>
+          </div>
+
+          <div className="flex flex-wrap gap-2.5">
+            {comparisons.map((pair, idx) => {
+              const labelA = formatSideLabel(getPartsA(pair), pair.colA);
+              const labelB = formatSideLabel(getPartsB(pair), pair.colB);
+              return (
+                <div
+                  key={`${pair.colA}::${pair.colB}::${idx}`}
+                  className="group flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-base-100 border border-base-content/10 shadow-sm hover:border-primary/40 transition-all duration-200"
+                >
+                  <span className="text-primary font-semibold text-xs sm:text-sm">{labelA}</span>
+                  <ArrowLeftRight className="w-3.5 h-3.5 text-base-content/40" />
+                  <span className="text-secondary font-semibold text-xs sm:text-sm">{labelB}</span>
+                  <button
+                    type="button"
+                    className="w-5 h-5 rounded-full flex items-center justify-center text-base-content/50 hover:bg-error/20 hover:text-error transition-colors ml-1"
+                    onClick={() => onRemovePair(idx)}
+                    disabled={disabled}
+                    title="Remove pair"
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
